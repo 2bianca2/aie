@@ -1,0 +1,15 @@
+{
+  "name": "iree-amd-aie-dev",
+  "build": {
+    "dockerfile": "../Dockerfile",
+    "target": "dev"
+  },
+  // A pattern: source + all submodules are prepared on the HOST (recursive clone).
+  // The container is a pure build/run environment and mounts the host source here.
+  "workspaceFolder": "/workspace",
+  // NPU passthrough. Device node is /dev/accel/accel0 (mode 666 -> no group-add needed).
+  "runArgs": ["--device=/dev/accel/accel0"],
+  // Non-root: reuse the base image's uid/gid 1000 user so bind-mounted files stay
+  // host-owned. updateRemoteUserUID (default true) remaps to the host uid.
+  "remoteUser": "ubuntu"
+}

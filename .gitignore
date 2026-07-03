@@ -103,3 +103,10 @@ artifacts/
 # Side effects of local patching/merging
 *.orig
 *.rej
+
+# Claude Code (operator's host tool only; must never be committed)
+.claude/
+
+# Peano/llvm-aie is a downloaded artifact (build_tools/download_peano.sh), not source
+/llvm-aie/
+/llvm_aie-*.dist-info/

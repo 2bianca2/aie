@@ -1,0 +1,20 @@
+# The dev stage installs apt deps only and COPYs no source, so the build
+# context should stay tiny. Exclude large/irrelevant trees and any secrets.
+.git
+.gitignore
+.claude
+.devcontainer
+docs
+third_party
+llvm-aie
+build
+build-*
+**/build
+**/.cache
+**/__pycache__
+**/*.o
+**/ccache
+.venv
+*.key
+*.pem
+id_*
