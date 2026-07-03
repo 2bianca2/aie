@@ -154,6 +154,26 @@ ctest --test-dir build -R amd-aie --output-on-failure -j $(nproc)
 > (`21.0.0.2026070201`)을 `PEANO_INSTALL_DIR`로 지정하니 통과 → **214/214 전부 통과**. (Peano v21은
 > 5절대로 pin에 반영됨.)
 
+### 4-1. 모델 e2e 테스트 (ONNX/PyTorch → NPU) — dev도 배포와 동일하게 가능
+
+dev 이미지는 배포 이미지의 모델 importer(torch/onnx)를 `/opt/venv`에 포함한다(배포 = dev의 부분집합).
+빌드를 `IREE_BUILD_PYTHON_BINDINGS=ON`으로 한 뒤(위 4절 명령이 이미 그럼), 원본 모델을 NPU까지 돌릴 수 있다:
+
+```bash
+# ONNX -> MLIR (importer는 빌드 트리의 version-matched 바인딩)
+PYTHONPATH=/workspace/build/compiler/bindings/python \
+  /opt/venv/bin/python -m iree.compiler.tools.import_onnx model.onnx -o model.mlir
+# PyTorch는 iree.compiler.extras.fx_importer (torch.export) 사용
+
+# MLIR -> NPU. iree-compile은 peano 경로를 '플래그로' 받아야 한다(환경변수만으론 부족)
+build/tools/iree-compile --iree-hal-target-backends=amd-aie --iree-amdaie-target-device=npu4 \
+  --iree-amd-aie-peano-install-dir=/workspace/llvm-aie \
+  --iree-amdaie-stack-size=2048 \
+  model.mlir -o model.vmfb           # 일부 워크로드는 stack-size 증대 필요
+build/tools/iree-run-module --device=amdxdna --module=model.vmfb --function=... --input=...
+```
+> torch는 `2.12.1+cpu`로 pin됨(dev/배포 동일). 배포 실행 세부는 `RUN.md` 참조.
+
 ---
 
 ## 5. 알려진 이슈 / 주의
