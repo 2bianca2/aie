@@ -127,8 +127,15 @@ cmake -B build -S third_party/iree -G Ninja \
   -DIREE_BUILD_TESTS=ON -DIREE_ENABLE_ASSERTIONS=ON \
   -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
   -DCMAKE_EXE_LINKER_FLAGS="-fuse-ld=lld" -DCMAKE_SHARED_LINKER_FLAGS="-fuse-ld=lld"
+
+# 빌드. 주의: ninja는 -j 없이도 기본적으로 '모든 코어'를 쓴다(가속용 옵션이 아니라 제한용이다).
+#   코어 많은 서버는 그대로 두면 되지만, 노트북 등 제약 호스트는 반드시 -j 로 낮춰라(예: -j 6).
+#   전 코어(max) 점유는 OS까지 CPU 기아로 화면/키보드/SSH가 먹통이 될 수 있다(§5 참고).
 cmake --build build
-ctest --test-dir build -R amd-aie --output-on-failure -j $(nproc)
+
+# 테스트. -j 없으면 순차(1개씩) 실행 = 안전(느림). 가속하려면 -j N 을 붙인다(예: -j 6).
+#   여기서 -j 를 코어 수(max)까지 올리면 위 빌드와 같은 먹통 위험이 있으니 코어 수보다 낮게.
+ctest --test-dir build -R amd-aie --output-on-failure
 # 기대: 100% tests passed, 0 failed out of 214
 # (IREE_ENABLE_ASSERTIONS=ON + PEANO_INSTALL_DIR 필수 — 하나라도 빠지면 일부 테스트 실패)
 ```
