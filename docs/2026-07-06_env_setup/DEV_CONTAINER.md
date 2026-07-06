@@ -73,7 +73,8 @@ bash build_tools/download_peano.sh
 - `.gitignore` — `.claude/`(Claude Code, git/컨테이너 미포함) + `/llvm-aie/`·`/llvm_aie-*.dist-info/`
   (download_peano 아티팩트, 실수 커밋 방지) 추가.
 - `build_tools/peano_commit_linux.txt` — Peano pin을 만료된 v19 → **v21**로 변경(§5).
-- `docs/` — 따라하기(`USER_GUIDE.md`) + 상세: `DEV_CONTAINER.md`·`HOST_PREREQUISITES.md`·`RUN.md`.
+- `scripts/` — 긴 명령 래퍼: `docker/`(호스트: build/run dev·deploy) + `build/`(컨테이너: configure·build) + `config.sh`.
+- `docs/2026-07-06_env_setup/` — 따라하기(`USER_GUIDE.md`) + 상세: `DEV_CONTAINER.md`·`HOST_PREREQUISITES.md`·`RUN.md`.
 
 의존성 근거(소스 대조):
 - cmake: IREE 요구 `3.26...3.29` ⊇ Ubuntu 24.04 apt cmake `3.28.3` → apt 사용(별도 install_cmake.sh 불필요).
@@ -114,6 +115,7 @@ docker run --rm -it \
 # 소스+submodule은 호스트가 준비했으므로 컨테이너에서 바로 4절 빌드로 진행한다.
 # (빌드만 할 거면 --device / PEANO_INSTALL_DIR 없이도 되지만, ctest amd-aie 전체 통과엔 PEANO_INSTALL_DIR 필요.)
 ```
+> 위 두 단계는 `./scripts/docker/build-dev.sh` + `./scripts/docker/run-dev.sh`와 동일하다(스크립트가 이 플래그들을 감싼다).
 
 ---
 
@@ -137,6 +139,8 @@ ctest --test-dir build -R amd-aie --output-on-failure
 # 기대: 100% tests passed, 0 failed out of 214
 # (IREE_ENABLE_ASSERTIONS=ON + PEANO_INSTALL_DIR 필수 — 하나라도 빠지면 일부 테스트 실패)
 ```
+
+> configure + build는 `./scripts/build/configure.sh` + `./scripts/build/build.sh`와 동일하다(스크립트가 위 플래그를 감싼다).
 
 빌드가 통과하면 dev 기반이 확정된다(배포 이미지도 동일 base-deps를 공유하므로 재현된다).
 

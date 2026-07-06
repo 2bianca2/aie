@@ -53,32 +53,16 @@ bash build_tools/download_peano.sh          # Peano(llvm-aie) v21 → ./llvm-aie
 ```
 참고: recursive clone이 중간에 끊기면 이어받지 말고 폴더를 지우고 처음부터 다시 받는다.
 
-### 2-2. 이미지 빌드 & 컨테이너 기동
+### 2-2. 이미지 빌드 & 컨테이너 기동 (호스트, repo 루트에서)
 ```bash
-docker build --target dev -t iree-amd-aie:dev .
-
-NPU=$(ls /dev/accel/ | head -1)           # 보통 accel0
-docker run --rm -it \
-  --user "$(id -u):$(id -g)" \            # 생성 파일을 본인 소유로
-  --device=/dev/accel/$NPU \              # NPU passthrough
-  -v ~/Projects/iree-amd-aie:/workspace \
-  -e HOME=/workspace \
-  -e PEANO_INSTALL_DIR=/workspace/llvm-aie \
-  iree-amd-aie:dev bash
+./scripts/docker/build-dev.sh     # dev 이미지 빌드
+./scripts/docker/run-dev.sh       # dev 컨테이너 진입 (NPU 자동감지, 호스트 uid, repo를 /workspace로 mount)
 ```
 
 ### 2-3. 빌드 & 테스트 (컨테이너 내부)
 ```bash
-cmake -B build -S third_party/iree -G Ninja \
-  -DIREE_CMAKE_PLUGIN_PATHS=$PWD -DIREE_BUILD_PYTHON_BINDINGS=ON \
-  -DIREE_INPUT_TORCH=ON -DIREE_INPUT_STABLEHLO=ON -DIREE_INPUT_TOSA=ON \
-  -DIREE_HAL_DRIVER_DEFAULTS=OFF -DIREE_TARGET_BACKEND_DEFAULTS=OFF \
-  -DIREE_TARGET_BACKEND_LLVM_CPU=ON -DIREE_EXTERNAL_HAL_DRIVERS=amdxdna \
-  -DIREE_BUILD_TESTS=ON -DIREE_ENABLE_ASSERTIONS=ON \
-  -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
-  -DCMAKE_EXE_LINKER_FLAGS="-fuse-ld=lld" -DCMAKE_SHARED_LINKER_FLAGS="-fuse-ld=lld"
-
-cmake --build build -j "$(nproc --ignore=2)"   # OS 몫 2코어 남김(전 코어 점유=먹통 방지). 노트북은 더 낮춰도 됨(예: -j 6)
+./scripts/build/configure.sh      # cmake configure (frontend 전부 ON, assertions ON, python bindings ON)
+./scripts/build/build.sh          # 빌드 (-j는 OS 몫 2코어를 남겨 먹통 방지)
 ctest --test-dir build -R amd-aie --output-on-failure
 # 기대: 100% tests passed, 0 failed out of 214
 ```
@@ -126,7 +110,7 @@ build/tools/iree-run-module --device=amdxdna --module=model.vmfb \
 수정 후에는 **컨테이너 안에서 다시 빌드·실행**한다 (ninja 증분 빌드라 바뀐 부분만 재컴파일 → 빠름):
 ```bash
 # (컨테이너 내부) 소스 수정 후
-cmake --build build -j "$(nproc --ignore=2)"            # 증분 재빌드
+./scripts/build/build.sh                                # 증분 재빌드
 ctest --test-dir build -R amd-aie --output-on-failure   # (선택) 테스트
 # 필요하면 2-4의 모델 → NPU 실행을 다시 수행
 ```
@@ -137,16 +121,10 @@ ctest --test-dir build -R amd-aie --output-on-failure   # (선택) 테스트
 
 받는 쪽이 **모델을 컴파일·실행만** 하는 self-contained 이미지. 소스/툴체인 없음.
 
-### 3-1. 이미지 빌드 & 배포 (제공자 측)
+### 3-1. 이미지 빌드 & 배포 (제공자 측, repo 루트에서)
 ```bash
-docker build --target runtime \
-  --build-arg IREE_AMD_AIE_COMMIT=<배포할 커밋 SHA> \
-  --build-arg BUILD_JOBS="$(nproc --ignore=2)" \   # OS 몫 2코어 남김(전 코어 점유 방지). 노트북은 더 낮춰도 됨
-  -t iree-amd-aie:deploy \
-  https://github.com/ace-knu/iree-amd-aie.git#dev
-
-# 배포: 이미지를 tar.gz로 저장해 전달
-docker save iree-amd-aie:deploy | gzip > iree-amd-aie-deploy.tar.gz
+# 고정 커밋에서 빌드 → tar.gz 저장까지 한 번에
+./scripts/docker/build-deploy.sh <배포할 커밋 SHA>
 ```
 참고: 배포할 커밋 SHA는 fork에 push된 커밋이어야 한다 (`git ls-remote https://github.com/ace-knu/iree-amd-aie.git dev` 로 확인).
 
@@ -166,5 +144,7 @@ iree-compile --iree-hal-target-backends=amd-aie --iree-amdaie-target-device=npu4
 iree-run-module --device=amdxdna --module=model.vmfb --function=main --input="1x3x224x224xf32=1"
 ```
 참고:
+- 위 로드·실행은 raw 명령이다 — 받는 측이 repo를 함께 받았다면 `./scripts/docker/load-deploy.sh` ·
+  `./scripts/docker/run-deploy.sh`로 대체할 수 있다.
 - import/compile/run 상세(타깃 디바이스, 함수·입력, stack-size)는 2-4를 참고한다.
 - 배포 이미지는 `PATH`·`PYTHONPATH`·`PEANO_INSTALL_DIR`가 이미 설정돼 있어 2-4의 `source`/`export` 단계는 필요 없다.

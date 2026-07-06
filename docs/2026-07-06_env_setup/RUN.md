@@ -33,6 +33,7 @@ docker save iree-amd-aie:deploy | gzip > iree-amd-aie-deploy.tar.gz
 # (B) 받는 측: 전달받은 이미지 로드
 gunzip -c iree-amd-aie-deploy.tar.gz | docker load
 ```
+> repo가 있으면 (A)는 `./scripts/docker/build-deploy.sh <커밋 SHA>`, (B)는 `./scripts/docker/load-deploy.sh`와 동일하다.
 
 ## 2. 실행 (NPU passthrough)
 ```bash
