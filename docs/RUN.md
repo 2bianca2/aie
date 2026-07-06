@@ -17,19 +17,21 @@ NPU에서 실행**하기만 하면 된다.
 
 ## 0. 사전조건
 호스트에 **NPU 스택(amdxdna KMD + 펌웨어) + Docker**가 준비돼 있어야 한다 →
-[`HOST_PREREQUISITES.md`](HOST_PREREQUISITES.md) 참조. 특히 **호스트 KMD와 이미지의 SHIM은
-버전 정합**(xdna-driver `20e1f74` 계열)이어야 실제 실행이 안전하다.
+[`HOST_PREREQUISITES.md`](HOST_PREREQUISITES.md) 참조. **호스트 KMD와 이미지 SHIM은 ABI 호환**돼야
+실제 실행이 안전하다(호환 드라이버 버전은 iree-amd-aie README가 지정; `xrt-smi examine` + 샘플 실행으로 검증).
 
 ## 1. 이미지 확보
 ```bash
-# (배포 방식 A) fork의 고정 커밋에서 직접 빌드 — 서버 권장(빌드 몇십 분~)
+# (A) 제공자: 고정 커밋에서 빌드 → tar.gz로 저장해 전달
+#   BUILD_JOBS는 OS 몫 2코어를 남겨 전 코어 점유(먹통)를 방지 (2-3/USER_GUIDE와 동일)
 docker build --target runtime \
   --build-arg IREE_AMD_AIE_COMMIT=<배포 커밋 SHA> \
-  -t iree-amd-aie:deploy https://github.com/ace-knu/iree-amd-aie.git#<브랜치>
-#   제약 호스트(노트북)면 --build-arg BUILD_JOBS=6 등으로 병렬도 낮춤
+  --build-arg BUILD_JOBS="$(nproc --ignore=2)" \
+  -t iree-amd-aie:deploy https://github.com/ace-knu/iree-amd-aie.git#dev
+docker save iree-amd-aie:deploy | gzip > iree-amd-aie-deploy.tar.gz
 
-# (배포 방식 B) 이미지 tar를 받은 경우
-docker load -i iree-amd-aie-deploy.tar
+# (B) 받는 측: 전달받은 이미지 로드
+gunzip -c iree-amd-aie-deploy.tar.gz | docker load
 ```
 
 ## 2. 실행 (NPU passthrough)
@@ -47,15 +49,17 @@ docker run --rm -it --device=/dev/accel/$NPU iree-amd-aie:deploy bash
 # ONNX
 python -m iree.compiler.tools.import_onnx model.onnx -o model.mlir
 
-# PyTorch: torch.export한 프로그램을 fx_importer로 변환 (짧은 파이썬 스크립트)
+# PyTorch: torch.export로 저장한 ExportedProgram(model.pt2)을 fx_importer로 변환
 python - <<'PY'
 import torch
 from iree.compiler.extras.fx_importer import FxImporter
-ep = torch.export.export(MyModule().eval(), (example_input,))
+ep = torch.export.load("model.pt2")             # 입력 shape 포함 → example_input 불필요
 imp = FxImporter(); imp.import_frozen_program(ep)
 open("model.mlir","w").write(str(imp.module))
 PY
 ```
+> model.pt2는 모델 저장 시 `torch.export.save(torch.export.export(model, (예시입력,)), "model.pt2")`로 만든다
+> (기존 .pt 모델도 torch 2.x에서 이렇게 변환; 입력 shape은 export 시점에 지정).
 
 ### 3-2. MLIR → NPU 실행
 ```bash
@@ -70,8 +74,10 @@ iree-compile --iree-hal-target-backends=amd-aie \
 #   --iree-amdaie-stack-size=2048 처럼 늘린다. 성능 경로는 bf16 + --iree-amdaie-enable-ukernels=all.
 
 # 실행: amdxdna HAL로 NPU에서 구동
+#   --function/--input은 model.mlir의 `func.func @<이름>(%arg0: tensor<...>)`를 보고 맞춘다
+#   (함수명=@<이름>; 입력=각 인자의 shape·dtype을 인자 수만큼). 아래는 예시.
 iree-run-module --device=amdxdna --module=model.vmfb \
-  --function=<name> --input=<...>
+  --function=main --input="1x3x224x224xf32=1"
 ```
 > 검증됨: 배포 이미지에서 ONNX matmul을 import→compile→`iree-run-module --device=amdxdna`로 NPU에서
 > 실행(rc=0) 확인. (naive f32 matmul은 수치 정확도가 낮을 수 있음 — 실제 워크로드는 bf16+ukernel 권장.)
@@ -106,6 +112,8 @@ iree-run-module --device=amdxdna --module=/tmp/mm.vmfb --function=mm \
 - 이미지 크기: Peano(~418MB) + `libIREECompiler.so`(native + python 바인딩) + torch(CPU) 때문에
   **수 GB**다. import 계층(python/torch/onnx)이 필요 없다면(미리 `.mlir`로 받는 경우) Dockerfile에서
   `IREE_BUILD_PYTHON_BINDINGS=OFF` + runtime의 python/torch/onnx를 빼 훨씬 작게 만들 수 있다.
-- **torch 버전 정합(빌드 시 검증 필요)**: PyTorch fx_importer는 `torch.export` API에 의존해 torch
-  버전에 민감하다. 배포 빌드 후 실제 PyTorch 모델로 import를 검증하고, 확인된 torch 버전을
-  Dockerfile에 pin하는 것이 좋다(현재는 CPU 최신 wheel).
+- **torch 버전**: PyTorch fx_importer는 `torch.export` API에 의존해 torch 버전에 민감하다. Dockerfile은
+  검증된 `torch==2.12.1+cpu`로 pin되어 있다(dev/배포 동일). torch를 올릴 때는 실제 PyTorch 모델 import를
+  다시 검증한다.
+- **환경변수**: 배포 이미지는 `PATH`(venv 포함)·`PYTHONPATH`·`PEANO_INSTALL_DIR`가 이미 설정돼 있어,
+  dev(2-4)와 달리 `source`/`export` 없이 `python3 -m ...`/`iree-compile`이 바로 동작한다.

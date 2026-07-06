@@ -16,7 +16,7 @@ dev/배포 컨테이너를 쓰기 **전에 호스트를 준비**하는 문서다
 |---|---|---|---|
 | OS/배포판 | 패키지·기본 버전이 다름 (본 가이드는 Ubuntu 24.04 기준) | `. /etc/os-release; echo "$PRETTY_NAME"` | Ubuntu 24.04.4 LTS |
 | 커널 버전 | `amdxdna` in-tree 지원(6.11+/6.14+)인지, DKMS 필요인지 | `uname -r` | 6.14.0-37-generic |
-| NPU 커널 드라이버(KMD) | 호스트가 로드해야 함. **컨테이너 SHIM과 ABI 호환** 필요 | `lsmod \| grep amdxdna` | amdxdna 로드됨 |
+| NPU 커널 드라이버(KMD) | 호스트가 로드해야 함. **컨테이너 SHIM과 ABI 호환** 필요 | `lsmod \| grep amdxdna` ; `modinfo amdxdna \| grep ^version` | 로드됨 (DKMS `xrt-amdxdna` 2.20.0) |
 | NPU 디바이스 노드·권한 | `accelN` 번호는 **인덱스 기반**이라 고정 아님. 권한이 다르면 `--group-add` 필요 | `ls -l /dev/accel/` | `/dev/accel/accel0` (grp `render`, mode `666` → group-add 불필요) |
 | NPU 펌웨어 | 호스트에 있어야 함 | `ls /usr/lib/firmware/amdnpu` | 존재 (`1502_00`, `17f0_*`) |
 | Docker | Engine + daemon 필요 | `docker --version` / `docker info` | 29.5.3 |
@@ -49,21 +49,23 @@ sudo usermod -aG docker "$USER"
 민감하므로 `amd/xdna-driver`의 자체 지시(README/`build.sh`)를 따른다**(여기서 임의 명령을 만들지 않음).
 
 - **(A) amdxdna in-tree 커널 사용** — mainline **6.14+** 또는 Ubuntu 24.04 **HWE 6.11+**. KMD가 커널에
-  포함되어 별도 드라이버 빌드가 불필요(레퍼런스 환경이 이 경우: 6.14 + amdxdna 로드).
-- **(B) out-of-tree DKMS 빌드** — `amd/xdna-driver`를 **커밋 `20e1f74`** 로 빌드·설치. 이 빌드가
-  **KMD + NPU 펌웨어 + XRT(호스트 유저스페이스 도구)** 를 함께 설치한다(iree-amd-aie README §Dependencies/
-  Driver도 이 커밋을 지정).
+  포함되어 별도 드라이버 빌드가 불필요.
+- **(B) out-of-tree DKMS 빌드** — `amd/xdna-driver`를 빌드·설치. **사용할 커밋은 iree-amd-aie README의
+  'Dependencies > Driver'가 지정**한다. 이 빌드가 **KMD + NPU 펌웨어 + XRT(호스트 유저스페이스 도구)** 를
+  함께 설치하고, DKMS라 커널 업데이트마다 자동 재빌드된다. (레퍼런스 호스트가 이 경우 — `xrt-amdxdna` DKMS 2.20.0)
   ```bash
   git clone https://github.com/amd/xdna-driver.git
-  cd xdna-driver && git checkout 20e1f74 && git submodule update --init --recursive
+  cd xdna-driver && git checkout <README가 지정한 커밋> && git submodule update --init --recursive
   # 빌드/설치 절차는 xdna-driver README(build.sh)를 그대로 따른다.
   # (기존 xrt 패키지가 있으면 충돌 방지로 제거: dpkg -l | awk '/^ii/&&$2~/^xrt/{print $2}' | xargs -r sudo apt-get remove -y)
   ```
 
 ### 버전 정합 (중요)
-호스트 KMD와 **컨테이너 SHIM**(`third_party/XRT`)이 xdna-driver 계열에서 **일치**해야 실제 NPU 실행이
-안전하다. 그래서 호스트 KMD도 컨테이너 SHIM과 같은 계열(`20e1f74` 기준)을 권장한다. (SHIM은 git에서
-빌드되어 컨테이너에 포함되므로 별도 설치가 필요 없다 — `DEV_CONTAINER.md §0` 참조.)
+호스트 KMD와 **컨테이너 SHIM**(`third_party/XRT`)이 **ABI 호환**돼야 실제 NPU 실행이 안전하다. 호환
+드라이버 커밋은 iree-amd-aie README가 지정하며, ABI는 대체로 **버전 계열(예: 2.20.x) 안에서 안정적**이라
+정확한 커밋 일치가 필수는 아니다(레퍼런스 호스트도 README의 커밋과 다른 2.20.0 계열로 동작). **최종 확인은
+실행으로 한다**: `source /opt/xilinx/xrt/setup.sh && xrt-smi examine`로 NPU가 잡히고 `RUN.md`의 샘플 모델이
+실행되면 호환된 것이다. (SHIM은 git에서 빌드되어 컨테이너에 포함되므로 별도 설치가 필요 없다 — `DEV_CONTAINER.md §0` 참조.)
 
 ---
 

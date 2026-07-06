@@ -8,7 +8,7 @@
 - 사용자: 컨테이너는 **호스트 사용자와 같은 uid/gid로 실행**한다(`docker run --user "$(id -u):$(id -g)"`
   또는 VS Code가 자동 매핑). 이렇게 해야 mount로 생성되는 파일이 호스트에서 **본인 소유로 남는다**
   (root 소유가 되어 sudo가 필요해지는 문제 방지).
-- 범위: **개발(dev) 컨테이너만**. 배포(runtime) 이미지는 Phase 2에서 추가한다.
+- 범위: **개발(dev) 컨테이너**. 배포(runtime) 이미지는 [`RUN.md`](RUN.md) 참조(따라하기 요약은 `USER_GUIDE.md`).
 
 > **왜 venv가 아니라 Docker인가?** 소스·산출물이 호스트에 남는다는 점은 venv와 비슷하지만, venv는
 > **python 패키지만** 격리한다. 이 빌드는 clang/lld·cmake·ninja 같은 **네이티브 C/C++ 툴체인**과
@@ -39,13 +39,13 @@
 ## 1. 호스트: 소스 준비 (recursive clone + Peano)
 
 **소스와 모든 submodule은 호스트가 준비**한다. 컨테이너는 빌드/실행 환경만 담고, 마운트된
-소스를 사용한다. fork(`ace-knu/iree-amd-aie`)에는 `main` 브랜치만 존재하여 `main` 기준으로 진행한다.
+소스를 사용한다. 컨테이너 설정·문서·pin이 담긴 `dev` 브랜치 기준으로 진행한다.
 
 ```bash
 mkdir -p ~/Projects
 # 모든 submodule까지 한 번에 받는다 (recursive). 중간에 끊기면 재개가 아니라
 # 처음부터 다시 받는 것이 안전하다(부분 clone은 'Unable to find current revision' 유발).
-git clone --recursive https://github.com/ace-knu/iree-amd-aie.git ~/Projects/iree-amd-aie
+git clone --recursive --branch dev https://github.com/ace-knu/iree-amd-aie.git ~/Projects/iree-amd-aie
 cd ~/Projects/iree-amd-aie
 git remote add upstream https://github.com/nod-ai/iree-amd-aie.git
 
@@ -65,14 +65,15 @@ bash build_tools/download_peano.sh
 
 ## 2. 컨테이너 파일 (repo 루트에 커밋)
 
-- `Dockerfile` — `base-deps`(공통 빌드 환경) + `dev`(non-root) 2스테이지. builder/runtime은 Phase 2 주석.
+- `Dockerfile` — 4스테이지: `base-deps`(공통 빌드 환경) + `dev`(non-root, 모델 importer torch/onnx 포함)
+  + `builder`(배포 빌드) + `runtime`(배포 이미지).
 - `.dockerignore` — dev 스테이지는 소스를 COPY하지 않으므로 빌드 컨텍스트 최소화.
 - `.devcontainer/devcontainer.json` — dev 타깃 빌드 + `/workspace` mount + `--device=/dev/accel/accel0`
   + `remoteUser: ubuntu`. (submodule/Peano는 호스트가 준비하므로 postCreate 없음.)
 - `.gitignore` — `.claude/`(Claude Code, git/컨테이너 미포함) + `/llvm-aie/`·`/llvm_aie-*.dist-info/`
   (download_peano 아티팩트, 실수 커밋 방지) 추가.
 - `build_tools/peano_commit_linux.txt` — Peano pin을 만료된 v19 → **v21**로 변경(§5).
-- `docs/` — 이 가이드(`DEV_CONTAINER.md`) + 호스트 준비(`HOST_PREREQUISITES.md`).
+- `docs/` — 따라하기(`USER_GUIDE.md`) + 상세: `DEV_CONTAINER.md`·`HOST_PREREQUISITES.md`·`RUN.md`.
 
 의존성 근거(소스 대조):
 - cmake: IREE 요구 `3.26...3.29` ⊇ Ubuntu 24.04 apt cmake `3.28.3` → apt 사용(별도 install_cmake.sh 불필요).
@@ -128,13 +129,10 @@ cmake -B build -S third_party/iree -G Ninja \
   -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
   -DCMAKE_EXE_LINKER_FLAGS="-fuse-ld=lld" -DCMAKE_SHARED_LINKER_FLAGS="-fuse-ld=lld"
 
-# 빌드. 주의: ninja는 -j 없이도 기본적으로 '모든 코어'를 쓴다(가속용 옵션이 아니라 제한용이다).
-#   코어 많은 서버는 그대로 두면 되지만, 노트북 등 제약 호스트는 반드시 -j 로 낮춰라(예: -j 6).
-#   전 코어(max) 점유는 OS까지 CPU 기아로 화면/키보드/SSH가 먹통이 될 수 있다(§5 참고).
-cmake --build build
+# 빌드. -j는 OS 몫 2코어를 남겨 전 코어 점유(먹통)를 방지 (ninja는 -j 없으면 전 코어 사용). 노트북은 더 낮춰도 됨(§5).
+cmake --build build -j "$(nproc --ignore=2)"
 
-# 테스트. -j 없으면 순차(1개씩) 실행 = 안전(느림). 가속하려면 -j N 을 붙인다(예: -j 6).
-#   여기서 -j 를 코어 수(max)까지 올리면 위 빌드와 같은 먹통 위험이 있으니 코어 수보다 낮게.
+# 테스트. -j 없으면 순차(안전). 214개가 순차로도 수초라 -j 불필요.
 ctest --test-dir build -R amd-aie --output-on-failure
 # 기대: 100% tests passed, 0 failed out of 214
 # (IREE_ENABLE_ASSERTIONS=ON + PEANO_INSTALL_DIR 필수 — 하나라도 빠지면 일부 테스트 실패)
@@ -167,17 +165,20 @@ dev 이미지는 배포 이미지의 모델 importer(torch/onnx)를 `/opt/venv`�
 빌드를 `IREE_BUILD_PYTHON_BINDINGS=ON`으로 한 뒤(위 4절 명령이 이미 그럼), 원본 모델을 NPU까지 돌릴 수 있다:
 
 ```bash
-# ONNX -> MLIR (importer는 빌드 트리의 version-matched 바인딩)
-PYTHONPATH=/workspace/build/compiler/bindings/python \
-  /opt/venv/bin/python -m iree.compiler.tools.import_onnx model.onnx -o model.mlir
-# PyTorch는 iree.compiler.extras.fx_importer (torch.export) 사용
+# venv 활성화(python=torch/onnx 포함) + iree.compiler 경로 (dev는 빌드 트리라 직접 지정)
+source /opt/venv/bin/activate
+export PYTHONPATH=/workspace/build/compiler/bindings/python
+
+# 원본 모델 -> MLIR
+python -m iree.compiler.tools.import_onnx model.onnx -o model.mlir   # ONNX
+# PyTorch는 torch.export.load("model.pt2") + fx_importer (USER_GUIDE 2-4 / RUN.md 참조)
 
 # MLIR -> NPU. iree-compile은 peano 경로를 '플래그로' 받아야 한다(환경변수만으론 부족)
 build/tools/iree-compile --iree-hal-target-backends=amd-aie --iree-amdaie-target-device=npu4 \
-  --iree-amd-aie-peano-install-dir=/workspace/llvm-aie \
-  --iree-amdaie-stack-size=2048 \
+  --iree-amd-aie-peano-install-dir=/workspace/llvm-aie --iree-amdaie-stack-size=2048 \
   model.mlir -o model.vmfb           # 일부 워크로드는 stack-size 증대 필요
-build/tools/iree-run-module --device=amdxdna --module=model.vmfb --function=... --input=...
+build/tools/iree-run-module --device=amdxdna --module=model.vmfb \
+  --function=main --input="1x3x224x224xf32=1"   # 함수명/입력은 model.mlir func.func 시그니처에 맞춤(예시)
 ```
 > torch는 `2.12.1+cpu`로 pin됨(dev/배포 동일). 배포 실행 세부는 `RUN.md` 참조.
 
@@ -217,11 +218,11 @@ build/tools/iree-run-module --device=amdxdna --module=model.vmfb --function=... 
 
 ---
 
-## 6. Phase 2 (배포 이미지) 예고
+## 6. 배포 이미지 (Phase 2)
 
-받는 기관이 **실행만** 하도록, builder에서 특정 커밋을 clone/build/install하고 runtime에 산출물만
-`COPY`하는 self-contained 이미지를 만든다. 호스트 준비는 이미 작성된 [`HOST_PREREQUISITES.md`](HOST_PREREQUISITES.md)를
-그대로 쓰고, 배포 이미지 실행/검증용 `docs/RUN.md`를 Phase 2에서 추가한다.
+받는 기관이 **실행만** 하도록, builder에서 특정 커밋을 clone/build하고 runtime에 산출물만 `COPY`하는
+self-contained 이미지를 만든다(모델 importer 포함). 빌드·tar.gz 배포·NPU 실행 절차는 [`RUN.md`](RUN.md),
+따라하기 요약은 [`USER_GUIDE.md`](USER_GUIDE.md) Part 3 참조.
 
 ---
 
