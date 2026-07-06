@@ -33,7 +33,8 @@ sudo usermod -aG docker "$USER"
 #      git clone https://github.com/amd/xdna-driver.git
 #      cd xdna-driver && git checkout 20e1f74 && git submodule update --init --recursive
 ```
-> 호스트 KMD와 컨테이너 SHIM은 xdna-driver `20e1f74` 계열로 맞춘다(버전 정합).
+참고: 실제 NPU 실행이 안전하려면 호스트 커널 드라이버(KMD)와 컨테이너의 XRT SHIM을 동일한
+xdna-driver 계열(20e1f74)로 맞춰야 한다.
 
 ---
 
@@ -92,7 +93,7 @@ build/tools/iree-compile --iree-hal-target-backends=amd-aie --iree-amdaie-target
   model.mlir -o model.vmfb
 build/tools/iree-run-module --device=amdxdna --module=model.vmfb --function=<name> --input=<...>
 ```
-> `--iree-amdaie-target-device`: Phoenix=`npu1_4col`, Strix=`npu4`.
+참고: iree-amdaie-target-device 값은 NPU 세대에 맞춘다 (Phoenix는 npu1_4col, Strix는 npu4).
 
 ---
 
@@ -108,7 +109,7 @@ docker build --target runtime \
   -t iree-amd-aie:deploy \
   https://github.com/ace-knu/iree-amd-aie.git#dev-container
 ```
-> `<배포할 커밋 SHA>`는 fork에 push된 커밋이어야 한다(예: `git ls-remote ... dev-container`의 SHA).
+참고: 배포할 커밋 SHA는 fork에 push된 커밋이어야 한다 (git ls-remote 로 dev-container 브랜치의 SHA 확인).
 
 ### 3-2. 실행 (NPU) — 컨테이너 내부
 ```bash
