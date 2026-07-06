@@ -14,8 +14,9 @@
 ### 1-1. 확인 (다 있으면 Part 2로)
 ```bash
 . /etc/os-release; echo "$PRETTY_NAME"   # Ubuntu 24.04 계열
-uname -r                                  # 커널 (amdxdna in-tree: 6.11+/6.14+)
+uname -r                                  # 커널 (6.11+/6.14+ 권장)
 lsmod | grep amdxdna                      # NPU 커널 드라이버 로드됨
+modinfo amdxdna | grep ^version           # 로드된 KMD 버전 (SHIM과 호환 계열인지 판단용)
 ls -l /dev/accel/                         # NPU 디바이스 노드(accelN) 존재
 ls /usr/lib/firmware/amdnpu               # NPU 펌웨어 존재
 docker --version                          # Docker 설치·동작
@@ -27,14 +28,16 @@ docker --version                          # Docker 설치·동작
 curl -fsSL https://get.docker.com | sudo sh
 sudo usermod -aG docker "$USER"
 
-# NPU 드라이버/펌웨어 (둘 중 하나)
-#  (A) amdxdna in-tree 커널 사용: mainline 6.14+ 또는 Ubuntu 24.04 HWE 6.11+  → 별도 빌드 불필요
-#  (B) DKMS 빌드: amd/xdna-driver 커밋 20e1f74 (KMD+펌웨어+XRT 함께 설치). 절차는 그 repo README를 따름
-#      git clone https://github.com/amd/xdna-driver.git
-#      cd xdna-driver && git checkout 20e1f74 && git submodule update --init --recursive
+# NPU 드라이버/펌웨어 (amdxdna가 없거나 SHIM과 다른 버전 계열일 때 설치)
+#   컨테이너 SHIM은 git(third_party/XRT)에 고정 → 호환되는 드라이버 커밋은 iree-amd-aie repo의
+#   README(Dependencies > Driver)가 지정한다. 그 커밋으로 KMD+펌웨어+XRT를 빌드·설치:
+#     git clone https://github.com/amd/xdna-driver.git
+#     cd xdna-driver && git checkout <README가 지정한 커밋> && git submodule update --init --recursive
+#     # 이후 빌드·설치는 xdna-driver repo 절차를 따름 (DKMS로 설치되면 커널 업데이트 시 자동 재빌드)
+#   (커널 6.14+/24.04 HWE 6.11+엔 in-tree amdxdna도 있으나, SHIM 정합을 위해 위 방식을 권장)
 ```
-참고: 실제 NPU 실행이 안전하려면 호스트 커널 드라이버(KMD)와 컨테이너의 XRT SHIM을 동일한
-xdna-driver 계열(20e1f74)로 맞춰야 한다.
+참고: 버전 숫자를 여기 박지 않는다 — 호환 드라이버는 repo README가 SHIM과 함께 git에서 관리한다.
+설치 후 `xrt-smi examine`으로 NPU 인식을 확인하고, Part 2/3의 샘플 모델이 실행되면(rc=0) 호환 확인이다.
 
 ---
 
