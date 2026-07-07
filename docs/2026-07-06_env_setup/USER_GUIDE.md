@@ -102,6 +102,27 @@ build/tools/iree-run-module --device=amdxdna --module=model.vmfb \
   - 함수명: @<이름> (ONNX는 graph명, PyTorch fx는 보통 main)
   - 입력: 각 인자의 shape·dtype을 인자 수만큼
 
+<details>
+<summary><b>번들 예시 모델로 셋업 확인</b> — <code>models/mlp_2layer</code></summary>
+
+> 2-layer MLP: `MatMul(x,w1) → Relu → MatMul(_,w2)` (bias 없음, 가중치도 런타임 입력, f32 128×128).
+>
+> ```bash
+> cd /workspace/models/mlp_2layer
+> python -m iree.compiler.tools.import_onnx mlp_2layer.onnx -o mlp_2layer.mlir
+> /workspace/build/tools/iree-compile --iree-hal-target-backends=amd-aie --iree-amdaie-target-device=npu4 \
+>   --iree-amd-aie-peano-install-dir=/workspace/llvm-aie --iree-amdaie-stack-size=2048 \
+>   mlp_2layer.mlir -o mlp_2layer.vmfb
+> # 함수명 mlp_2layer, 입력 3개(x,w1,w2=128x128xf32). 상수 1.0 입력이면 각 원소 16384가 나와야 정상.
+> /workspace/build/tools/iree-run-module --device=amdxdna --module=mlp_2layer.vmfb \
+>   --function=mlp_2layer --input="128x128xf32=1" --input="128x128xf32=1" --input="128x128xf32=1"
+> ```
+>
+> 생성 스크립트: `models/mlp_2layer/export_mlp_2layer.py`. 정확도는 `--output=@out.npy`로 받아
+> numpy `relu(x@w1)@w2`와 비교.
+
+</details>
+
 ### 2-5. 개발 (소스 수정 → 재빌드 → 실행)
 
 소스코드는 **호스트(`~/Projects/iree-amd-aie`)와 컨테이너(`/workspace`)가 같은 파일**이다(bind-mount).
