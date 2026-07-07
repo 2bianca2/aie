@@ -24,7 +24,7 @@
 없을 때 설치 방법 포함).
 
 **호스트 준비 이후는 모든 호스트에서 동일**하다. 호스트-특정 항목(커널/KMD/디바이스/펌웨어/Docker)만
-각자 맞추면, 그 다음(**동일 fork `git clone --recursive` → `download_peano.sh` v21 → `docker build` →
+각자 맞추면, 그 다음(**동일 fork `git clone --recursive` → `download_peano.sh` v19 → `docker build` →
 컨테이너에서 고정 플래그로 빌드**)은 **정해진 소스/버전**이라 동일하다. 특히:
 
 - **유저스페이스 XRT SHIM(amdxdna HAL 드라이버)은 git에 포함되어 빌드된다** — repo의
@@ -50,7 +50,7 @@ cd ~/Projects/iree-amd-aie
 git remote add upstream https://github.com/nod-ai/iree-amd-aie.git
 
 # Peano(llvm-aie) - AIE core 컴파일용 (aie2xclbin, e2e/실행 테스트에 필요).
-# repo 루트에서 실행하면 프로젝트 안 './llvm-aie'에 설치된다(원샷). pin은 v21(5절 참조).
+# repo 루트에서 실행하면 프로젝트 안 './llvm-aie'에 설치된다(원샷). pin은 v19(5절 참조).
 bash build_tools/download_peano.sh
 ```
 
@@ -72,7 +72,8 @@ bash build_tools/download_peano.sh
   + `remoteUser: ubuntu`. (submodule/Peano는 호스트가 준비하므로 postCreate 없음.)
 - `.gitignore` — `.claude/`(Claude Code, git/컨테이너 미포함) + `/llvm-aie/`·`/llvm_aie-*.dist-info/`
   (download_peano 아티팩트, 실수 커밋 방지) 추가.
-- `build_tools/peano_commit_linux.txt` — Peano pin을 만료된 v19 → **v21**로 변경(§5).
+- `build_tools/peano_commit_linux.txt` — Peano pin을 **v19로 고정**(fork release 미러에서 받음).
+  v21은 ctest는 통과하나 npu4 f32 codegen을 깨뜨려 되돌림(§5).
 - `scripts/` — 긴 명령 래퍼: `docker/`(호스트: build/run dev·deploy) + `build/`(컨테이너: configure·build) + `config.sh`.
 - `docs/2026-07-06_env_setup/` — 따라하기(`USER_GUIDE.md`) + 상세: `DEV_CONTAINER.md`·`HOST_PREREQUISITES.md`·`RUN.md`.
 
@@ -194,13 +195,18 @@ build/tools/iree-run-module --device=amdxdna --module=model.vmfb \
   트레이스(`XAIE API: ...`)를 FileCheck한다. `LLVM_DEBUG`는 assertions 빌드에서만 활성이라, Release
   (`-DNDEBUG`) 빌드에서는 이 13개가 실패한다. `-DIREE_ENABLE_ASSERTIONS=ON`으로 빌드하면 통과한다.
   (dev 컨테이너 기본값으로 권장. upstream CI도 `assertions:[ON,OFF]` 매트릭스 사용.)
-- **Peano pin을 v21로 bump함 (해결)**: 기존 pin `llvm_aie==19.0.0.2025052701+31d2aa6e`는 Xilinx/llvm-aie
-  **nightly 자산 보관 기간 만료로 삭제**되어 `download_peano.sh`로 받을 수 없었다. 현재 공개된
-  `21.0.0.2026070201+4617c73e`로 호환성을 검증(위 3개 Peano 테스트 + 전체 amd-aie **214/214 통과**)한 뒤
-  `build_tools/peano_commit_linux.txt`를 **v21로 pin 변경**했다(`19 -> 21` 메이저 점프지만 호환됨).
-  `download_peano.sh`가 새 pin으로 정상 동작함도 확인. → **다른 기관 재현 가능.**
-  주의: v21도 **nightly**라 언젠가 다시 만료된다. 장기적으로는 특정 릴리스 미러링/vendoring이 더 안전하다.
-  (`peano_commit_windows.txt`는 이번에 미변경 — linux만 대상.)
+- **Peano pin을 v19로 고정 + fork release 미러 (해결)**: pin 이력이 두 번 바뀌었다.
+  (1) 원래 pin `llvm_aie==19.0.0.2025052701+31d2aa6e`(v19)는 Xilinx/llvm-aie **nightly 자산 만료로 삭제**되어
+  `download_peano.sh`로 받을 수 없었다. (2) 그래서 당시 공개돼 있던 `21.0.0.2026070201+4617c73e`(v21)로
+  bump했고 ctest(위 3개 Peano 테스트 포함 amd-aie **214/214**)는 통과했다. **그러나 v21은 npu4 f32
+  matmul을 수치적으로 깨뜨린다** — 동일 MLIR·플래그·NPU에서 v21은 쓰레기값(`2.95E20/INF/0`), v19는
+  정답(128)임을 IREE/Peano 2×2 교차검증으로 확정했다(회귀는 IREE가 아니라 **Peano 코어 codegen**).
+  (3) 따라서 **v19로 되돌렸다.** nightly는 v19를 이미 prune했으므로, v19를 **ace-knu fork의 GitHub
+  Release 자산으로 미러링**(tag `peano-v19`, `peano-v19-linux.tar.gz`)하고 `download_peano.sh`가 그
+  tarball을 받아 `./llvm-aie`에 풀도록 수정했다(§7 미러링 옵션 채택). release 자산은 nightly와 달리
+  자동 prune되지 않아 재현 가능하다.
+  주의: ctest 214/214는 f32 **e2e codegen 정확도**를 잡아내지 못한다(그래서 v21이 통과했었다). bf16 정확
+  경로는 npu4 ukernel이 필요하며 별도 과제다. (`peano_commit_windows.txt`는 미변경 — linux만 대상.)
 - **submodule은 무중단 recursive clone**: `git clone --recursive`를 중간에 끊으면 부분 clone이 남아
   재실행 시 `fatal: Unable to find current revision`가 난다. 끊겼으면 해당 submodule(또는 clone 전체)을
   삭제하고 처음부터 다시 받는다.
@@ -230,7 +236,7 @@ self-contained 이미지를 만든다(모델 importer 포함). 빌드·tar.gz �
 
 ---
 
-## 7. 재현성 견고성 / 만료 위험 (후속 개선 후보 — 현재는 문서화만, 미적용)
+## 7. 재현성 견고성 / 만료 위험 (Peano 미러링은 적용됨; 나머지는 문서화만)
 
 이 셋업은 clone 시 외부 소스 여러 곳 + nightly 바이너리 + 버전 미고정 apt에 의존한다. "몇 년 뒤 /
 다른 기관에서 그대로 재현"을 보장하려면 아래 위험을 인지하고, 필요 시 미러링/스냅샷을 도입한다.
@@ -239,17 +245,19 @@ self-contained 이미지를 만든다(모델 importer 포함). 빌드·tar.gz �
 
 | 의존물 | 출처 | 위험 | 이유 |
 |---|---|---|---|
-| Peano (llvm-aie) | Xilinx/llvm-aie **nightly** | 높음 | nightly 자산 주기적 prune. v19 이미 삭제됨, v21도 언젠가 만료 |
+| Peano (llvm-aie) | **ace-knu fork Release** (미러) | 낮음 | v19를 fork release 자산으로 미러(§5). release는 자동 prune 안 됨 |
 | XRT, mlir-air | **nod-ai fork**, feature 브랜치 | 중간 | 브랜치 force-push/삭제 시 pin 커밋 orphan → `clone --recursive` 영구 실패 |
 | openssl-cmake | viaduck (소규모 3rd-party) | 중간 | 소규모 저장소 소멸 가능성 |
 | iree, iree-org/llvm-project | iree-org (fork) | 낮음~중간 | rc 커밋, fork |
 | apt 패키지 (cmake 등), `ubuntu:24.04` | Ubuntu 24.04 archive (버전 미고정) | 낮음 | 24.04 내 드리프트 + EOL 후 old-releases 이동(수년) |
 
 **개선 옵션 (도입 시):**
-- **Peano 미러링(가장 높은 위험/가장 싼 해결)**: v21 wheel을 ace-knu fork의 **GitHub Release 자산**으로
-  올리고(release 자산은 nightly와 달리 자동 prune 안 됨) `download_peano.sh`가 그 URL을 받게 수정.
+- **Peano 미러링 — 적용됨(§5)**: v19를 ace-knu fork의 **GitHub Release 자산**(tag `peano-v19`,
+  `peano-v19-linux.tar.gz`)으로 올리고(release 자산은 nightly와 달리 자동 prune 안 됨) `download_peano.sh`가
+  그 tarball을 받게 수정했다.
 - **전체 소스트리 스냅샷(가장 견고)**: 완전히 채워진 트리(submodule + peano)를 tarball로 durable 보관 →
   live clone 실패 시 fallback. submodule orphan까지 대비. 수 GB.
 - **base 이미지/apt 고정(선택)**: `ubuntu:24.04@sha256:...` 다이제스트 pin, 필요 시 apt 버전 pin.
 
-> 현재는 v21 pin으로 재현 가능한 상태이며, 위 미러링/스냅샷은 **환경을 개선·정리할 때 재검토**한다.
+> 현재는 v19 pin(fork release 미러)으로 재현 가능한 상태이며, 소스트리 스냅샷/base 이미지 고정은
+> **환경을 개선·정리할 때 재검토**한다.
