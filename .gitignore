@@ -27,8 +27,8 @@ kernel-doc
 # macOS files
 .DS_Store
 
-# CMake artifacts
-build/
+# CMake artifacts (root build tree only; unanchored `build/` also hid scripts/build/)
+/build/
 build-*/
 Testing/
 
