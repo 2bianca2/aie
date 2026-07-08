@@ -120,6 +120,9 @@ build/tools/iree-run-module --device=amdxdna --module=model.vmfb \
 >
 > 생성 스크립트: `models/mlp_2layer/export_mlp_2layer.py`. 정확도는 `--output=@out.npy`로 받아
 > numpy `relu(x@w1)@w2`와 비교.
+>
+> 컴파일 각 단계의 MLIR을 덤프해 변환 과정을 추적하려면 `./scripts/docker/run-debug.sh`
+> (도구 `scripts/debug/pipeline_dump.py`) — 상세는 [`DEBUG_PIPELINE.md`](DEBUG_PIPELINE.md).
 
 </details>
 

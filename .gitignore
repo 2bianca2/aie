@@ -7,6 +7,9 @@
 *-install/
 kernel-doc
 
+# lit test outputs written next to source tests when run in-tree (transient)
+**/test/Output/
+
 # Python
 .env
 *.pyc
@@ -110,3 +113,6 @@ artifacts/
 # Peano/llvm-aie is a downloaded artifact (build_tools/download_peano.sh), not source
 /llvm-aie/
 /llvm_aie-*.dist-info/
+
+# pipeline_dump.py debug artifacts (scripts/debug), regenerated per run
+/debug_out/
