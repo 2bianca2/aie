@@ -106,6 +106,7 @@ docker build --target dev -t iree-amd-aie:dev .
 NPU=$(ls /dev/accel/ | head -1)   # 예: accel0
 docker run --rm -it \
   --user "$(id -u):$(id -g)" \
+  -v /etc/passwd:/etc/passwd:ro -v /etc/group:/etc/group:ro \
   --device=/dev/accel/$NPU \
   -v ~/Projects/iree-amd-aie:/workspace \
   -e HOME=/workspace \
@@ -113,6 +114,8 @@ docker run --rm -it \
   iree-amd-aie:dev bash
 # --user "$(id -u):$(id -g)": 호스트 사용자 uid/gid로 실행 → 생성 파일이 본인 소유(uid 1000 아니어도 OK).
 #   (본인이 clone한 소스라 소유자와 uid가 일치해 쓰기 정상. -e HOME=/workspace 는 임의 uid에서 ccache 등 HOME 의존 도구 대비.)
+# -v /etc/passwd:ro -v /etc/group:ro: uid/gid를 컨테이너 안에서 '이름'으로 해석 (uid≠1000일 때
+#   "I have no name!"/"groups: cannot find name" 방지). 소유권과 무관, 표시만의 문제.
 # 소스+submodule은 호스트가 준비했으므로 컨테이너에서 바로 4절 빌드로 진행한다.
 # (빌드만 할 거면 --device / PEANO_INSTALL_DIR 없이도 되지만, ctest amd-aie 전체 통과엔 PEANO_INSTALL_DIR 필요.)
 ```
@@ -219,6 +222,9 @@ build/tools/iree-run-module --device=amdxdna --module=model.vmfb \
   — CLI는 `docker run --user "$(id -u):$(id -g)"`, VS Code devcontainer는 `updateRemoteUserUID`(기본 true)가
   이미지의 `ubuntu` 사용자 uid를 호스트 uid로 자동 remap. (이미지 기본 사용자는 `ubuntu`이지만 uid 1000에
   고정 의존하지 않는다.)
+  단, uid/gid가 1000(이미지의 `ubuntu`)이 아니면 컨테이너 passwd에 이름이 없어 셸이 `I have no name!` /
+  `groups: cannot find name`을 낸다(소유권은 정상, 표시만의 문제). run-dev.sh/run-debug.sh가
+  `-v /etc/passwd:/etc/passwd:ro -v /etc/group:/etc/group:ro`로 호스트 이름을 해석해 이를 없앤다.
 - **frontend 전부 ON**: `IREE_INPUT_STABLEHLO/TORCH/TOSA=ON`은 관련 submodule(stablehlo, torch-mlir)이
   필요하다. recursive clone이 이를 포함한다.
 - **제약 호스트(노트북 등)에서의 자원 제한**: 이 빌드는 LLVM 포함이라 전 코어를 오래 100%로 점유한다.

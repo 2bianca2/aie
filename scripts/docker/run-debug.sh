@@ -11,6 +11,9 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 root="$(git -C "$here" rev-parse --show-toplevel)"
 
 args=(--rm --user "$(id -u):$(id -g)")
+# resolve host uid/gid to names inside the container (avoids "I have no name!" /
+# "groups: cannot find name" when the host uid/gid isn't the image's ubuntu 1000)
+args+=(-v /etc/passwd:/etc/passwd:ro -v /etc/group:/etc/group:ro)
 npu="$(npu_device)"
 [ -n "$npu" ] && args+=(--device="/dev/accel/$npu")
 args+=(-v "$root:/workspace" -w /workspace -e HOME=/workspace -e PEANO_INSTALL_DIR=/workspace/llvm-aie)
