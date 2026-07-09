@@ -132,8 +132,10 @@ cmake -B build -S third_party/iree -G Ninja \
   -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
   -DCMAKE_EXE_LINKER_FLAGS="-fuse-ld=lld" -DCMAKE_SHARED_LINKER_FLAGS="-fuse-ld=lld"
 
-# 빌드. -j는 OS 몫 2코어를 남겨 전 코어 점유(먹통)를 방지 (ninja는 -j 없으면 전 코어 사용). 노트북은 더 낮춰도 됨(§5).
-cmake --build build -j "$(nproc --ignore=2)"
+# 빌드. LLVM 컴파일은 잡당 ~4GB라 RAM 초과 시 먹통/OOM되므로 코어·RAM에 맞춰 -j를 정한다.
+# 아래 -j 6은 수동 실행용 고정 예시값(안전한 기본 6 안팎)이다 — RAM/코어가 적으면 더 낮춘다.
+# 스크립트 build.sh는 이 -j를 min(6, nproc-2, RAM_GB/4)로 자동 계산한다.
+cmake --build build -j 6
 
 # 테스트. -j 없으면 순차(안전). 214개가 순차로도 수초라 -j 불필요.
 ctest --test-dir build -R amd-aie --output-on-failure
@@ -223,8 +225,9 @@ build/tools/iree-run-module --device=amdxdna --module=model.vmfb \
   코어가 적거나 발열/응답성이 걱정되는 호스트(예: 노트북)에서는 `-j`를 낮추고 컨테이너 CPU를 제한한다.
   예: `docker run --cpus=6 ... iree-amd-aie:dev bash -lc 'nice -n 19 cmake --build build -j 6'`.
   이는 **실행 단위(per-run) 선택**일 뿐 이미지/`devcontainer.json`에는 넣지 않는다(빌드 서버는 풀 병렬 사용).
-  (구축 당시 실측: `-j 24` 풀 병렬은 12코어 노트북에서 OS까지 CPU 기아 → 먹통/강제종료. `--cpus=6 -j 6`으로
-  CPU를 600%로 캡하니 응답성 유지하며 정상 진행.)
+  (구축 당시 실측: `-j 24` 풀 병렬은 12코어/24스레드 노트북에서 CPU 기아 + RAM 초과로 먹통/강제종료 —
+  `nproc`는 SMT 스레드(24)를 세므로 `nproc-2`도 과다다. LLVM 컴파일은 잡당 ~2-4GB라 RAM이 병목이다.
+  그래서 config.sh는 `min(6, nproc-2, RAM_GB/4)`로 캡한다. `--cpus=6 -j 6`으로 응답성 유지하며 정상 진행.)
 
 ---
 

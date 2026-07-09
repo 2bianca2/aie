@@ -19,14 +19,17 @@ lsmod | grep amdxdna                      # NPU 커널 드라이버 로드됨
 modinfo amdxdna | grep ^version           # 로드된 KMD 버전 (SHIM과 호환 계열인지 판단용)
 ls -l /dev/accel/                         # NPU 디바이스 노드(accelN) 존재
 ls /usr/lib/firmware/amdnpu               # NPU 펌웨어 존재
-docker --version                          # Docker 설치·동작
+docker info >/dev/null 2>&1 && echo "docker OK (sudo 불필요)"  # Docker 설치 + sudo 없이 데몬 접근 확인
 ```
 
 ### 1-2. 없을 때 설치
 ```bash
-# Docker (한 줄 설치 후 재로그인)
+# Docker (한 줄 설치)
 curl -fsSL https://get.docker.com | sudo sh
+# sudo 없이 docker 사용 (docker 그룹 추가)
 sudo usermod -aG docker "$USER"
+newgrp docker                             # 현재 셸에 그룹 즉시 적용 (또는 완전히 로그아웃 후 재로그인)
+docker info >/dev/null && echo "docker OK (sudo 불필요)"   # 권한오류가 나면 재로그인 후 다시
 
 # NPU 드라이버/펌웨어 (amdxdna가 없거나 SHIM과 다른 버전 계열일 때 설치)
 #   사용할 드라이버 커밋은 iree-amd-aie README의 'Dependencies > Driver'에서 확인한다.
@@ -62,7 +65,7 @@ bash build_tools/download_peano.sh          # Peano(llvm-aie) v19 → ./llvm-aie
 ### 2-3. 빌드 & 테스트 (컨테이너 내부)
 ```bash
 ./scripts/build/configure.sh      # cmake configure (frontend 전부 ON, assertions ON, python bindings ON)
-./scripts/build/build.sh          # 빌드 (-j는 OS 몫 2코어를 남겨 먹통 방지)
+./scripts/build/build.sh          # 빌드 (-j는 코어와 RAM에 맞춰 자동 축소, RAM 부족 먹통 방지. config.sh에서 조절 가능)
 ctest --test-dir build -R amd-aie --output-on-failure
 # 기대: 100% tests passed, 0 failed out of 214
 ```

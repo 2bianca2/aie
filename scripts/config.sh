@@ -8,8 +8,16 @@ REPO_URL="${REPO_URL:-https://github.com/ace-knu/iree-amd-aie.git}"
 BRANCH="${BRANCH:-dev}"
 DEPLOY_TAR="${DEPLOY_TAR:-iree-amd-aie-deploy.tar.gz}"
 
-# Adaptive build parallelism: leave 2 cores for the OS (avoids full-core freeze).
-JOBS="${JOBS:-$(nproc --ignore=2)}"
+# Adaptive build parallelism, bounded by BOTH cpu and RAM.
+# LLVM/MLIR C++ compiles peak ~4 GB each; over-subscribing RAM freezes/OOMs the host.
+# Default caps at 6 for stability; scales down on smaller hosts. Override: JOBS=N ./build.sh
+if [ -z "${JOBS:-}" ]; then
+  mem_gb=$(awk '/MemTotal/{print int($2/1048576)}' /proc/meminfo)
+  JOBS=$(nproc); JOBS=$(( JOBS > 2 ? JOBS - 2 : 1 ))
+  [ $(( mem_gb / 4 )) -lt "$JOBS" ] && JOBS=$(( mem_gb / 4 ))
+  [ "$JOBS" -gt 6 ] && JOBS=6
+  [ "$JOBS" -lt 1 ] && JOBS=1
+fi
 
 # First NPU accel device name (e.g. accel0); empty if none present.
 npu_device() { ls /dev/accel/ 2>/dev/null | head -1; }
