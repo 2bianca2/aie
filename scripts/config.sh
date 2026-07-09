@@ -21,3 +21,8 @@ fi
 
 # First NPU accel device name (e.g. accel0); empty if none present.
 npu_device() { ls /dev/accel/ 2>/dev/null | head -1; }
+
+# Owning-group gid of an NPU device node, for `docker run --group-add`. Lets the
+# container user open a 0660 root:render node without host-side group changes
+# (docker --user drops supplementary groups). Arg defaults to npu_device().
+device_gid() { local n="${1:-$(npu_device)}"; [ -n "$n" ] && stat -c '%g' "/dev/accel/$n"; }

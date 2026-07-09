@@ -1,9 +1,11 @@
 # 컴파일 파이프라인 디버깅 (단계별 MLIR 덤프)
 
 입력 모델(ONNX)의 AMD-AIE 풀스택 컴파일을 **단계별로 추적**하기 위한 도구다.
-`iree-compile`을 여러 번 호출해 컴파일 phase마다의 MLIR 스냅샷과 백엔드 아티팩트를 모으고,
-최종 vmfb를 NPU에서 실행한 뒤 numpy 레퍼런스와 비교한다. 실행한 모든 명령을 `MANIFEST.txt`에
-기록해 각 단계를 손으로 재현할 수 있다.
+기본(full) 모드는 `iree-compile` **한 번 실행에 `--dump-compilation-phases-to`로 모든 phase의 MLIR
+스냅샷**과 백엔드 아티팩트를 모으고, 최종 vmfb를 NPU에서 실행한 뒤 numpy 레퍼런스와 비교한다.
+패스를 고쳐가며 연구할 때는 **재개(resume) 모드**(`--from-phase`)로 이전 덤프의 특정 phase IR부터
+`--compile-from`으로 **구간만 재실행**하고 그 구간/특정 패스의 입출력 MLIR을 빠르게 확인할 수 있다
+(프론트엔드를 건너뛰어 빠름). 실행한 모든 명령을 `MANIFEST.txt`에 기록해 각 단계를 손으로 재현할 수 있다.
 
 - 도구: `scripts/debug/pipeline_dump.py` (dev 컨테이너 안 실행)
 - 호스트 래퍼: `scripts/docker/run-debug.sh` (venv + PYTHONPATH 세팅 후 컨테이너에서 실행)
@@ -33,6 +35,9 @@
 - `--rtol/--atol` : 비교 허용오차(기본 1e-3)
 - `--elide` : `--mlir-elide-elementsattrs-if-larger` (기본 64, 덤프 가독성)
 - `--outdir` : 기본 `debug_out`
+- `--from-phase` : 재개 모드 진입 — 같은 `--label`의 이전 덤프 `phases/N.<phase>.mlir`부터 재실행
+  (아래 "패스 연구 워크플로우" 참고). 지정 시 import/프론트엔드를 건너뛰고 NPU 실행은 하지 않는다.
+- `--to-phase` : 재개 정지점(기본 `executable-targets` = AIE 코드젠). `--from-phase`와 함께 쓴다.
 
 컨테이너 안에서 직접 실행하려면 (`run-dev.sh` 진입 후):
 ```bash
@@ -63,17 +68,23 @@ np.save(f"{d}/expected.npy", (np.maximum(x@w1,0)@w2).astype(np.float32))  # (선
 
 ## 산출물 레이아웃 (`debug_out/<model>_<label>/`)
 
+파일명 `N.<phase>.mlir`의 `N`은 IREE의 `IREEVMPipelinePhase` enum 순번이다. full 컴파일 1회에
+`--dump-compilation-phases-to`가 아래 phase들을 모두 자동으로 덤프한다(중간에 실패해도 그 이전
+phase 덤프는 남는다). 별도의 phase별 `.log`는 없고, 통합 stderr는 `backend/aie2xclbin.log`에 있다.
+
 ```
 00_source.mlir                 # import_onnx 결과 (.mlir 입력이면 복사본)
-phases/
-  01_input.mlir                # --compile-to=input      (frontend: torch->linalg+ABI)
-  02_flow.mlir                 #             flow         (dispatch 형성)
-  03_stream.mlir               #             stream       (async 스케줄/버퍼)
-  04_executable-configurations.mlir  #       (codegen 직전, lowering strategy 선택 후)
-  05_executable-targets.mlir   #             (amdaie->aie codegen 완료; 물리화 IR, 큼)
-  06_vm.mlir                   #             vm           (vmfb 직전)
-  NN_<phase>.log               # 각 phase 컴파일 stderr
-passes/                        # --pass 준 경우만 (MLIR IR-print 파일 트리)
+phases/                        # --dump-compilation-phases-to (full 모드 1회 호출로 전체 덤프)
+  1.input.mlir                 # frontend: torch->linalg+ABI
+  6.flow.mlir                  # dispatch 형성
+  7.stream.mlir                # async 스케줄/버퍼
+  8.executable-sources.mlir    # hal.executable 구성 직전 (codegen 제외)
+  9.executable-configurations.mlir  # codegen 직전, lowering strategy 선택 후
+  10.executable-targets.mlir   # amdaie->aie codegen(translation) 완료; 물리화 IR, 큼
+  11.hal.mlir                  # hal 확정
+  12.vm.mlir                   # vmfb 직전
+  # 이 외 2.abi / 3.preprocessing / 4.global-optimization / 5.dispatch-creation 도 덤프됨
+passes/                        # full 모드에서 --pass 준 경우만 (MLIR IR-print 파일 트리)
 backend/
   dump_files/…                 # --iree-hal-dump-executable-files-to
   dump_intermediates/…         # --iree-hal-dump-executable-intermediates-to
@@ -83,7 +94,12 @@ run/
   out0.npy …                   # NPU 실행 출력
   compare.txt                  # --expected 준 경우 비교 리포트
   run.log                      # iree-run-module stderr
-MANIFEST.txt                   # 실행한 모든 명령 + rc + 소요시간 (재현용)
+resume/                        # 재개 모드(--from-phase) 산출물. baseline은 건드리지 않음
+  <from>_to_<to>.mlir          # 재개 구간 출력 IR
+  <from>_to_<to>.log           # 재개 컴파일 stderr
+  passes/                      # 재개 중 --pass 준 경우 (before/after IR 트리)
+  MANIFEST.txt                 # 재개 명령 기록
+MANIFEST.txt                   # full 실행 명령 + rc + 소요시간 (재현용)
 ```
 
 ## npy 입력/출력 규약 (중요)
@@ -100,7 +116,61 @@ MANIFEST.txt                   # 실행한 모든 명령 + rc + 소요시간 (�
 여러 번 지정 가능. 결과는 `passes/` 아래 MLIR IR-print 트리로 저장되며, dispatch/파일별로
 `…_0_<pass>.mlir`(before) / `…_1_<pass>.mlir`(after) 쌍이 생긴다.
 
+## 패스 연구 워크플로우 (구간 실행 + I/O MLIR)
+
+파이프라인의 특정 단계에서 패스를 수정·추가하며 반복 개발할 때 쓴다. 매번 ONNX 프론트엔드부터
+전체를 재컴파일하지 않고, **이전 덤프의 phase IR부터 구간만 재실행**해서 빠르게 확인한다.
+
+3-step 루프:
+```bash
+# 1) baseline: 모든 phase IR 1회 덤프 + vmfb + NPU 실행 (full 모드)
+./scripts/docker/run-debug.sh --model models/mlp_2layer/mlp_2layer.onnx --function mlp_2layer \
+  --input debug_out/_inputs/x.npy --input debug_out/_inputs/w1.npy --input debug_out/_inputs/w2.npy \
+  --label base
+#   -> debug_out/mlp_2layer_base/phases/{1.input … 10.executable-targets … 12.vm}.mlir + model.vmfb
+
+# 2) 대상 패스 수정 (예: compiler/.../Transforms/Passes.cpp) 후 컨테이너에서 증분 빌드
+./scripts/build/build.sh
+
+# 3) 구간만 재개(프론트엔드 skip) + 특정 패스 before/after IR 확인
+./scripts/docker/run-debug.sh --model models/mlp_2layer/mlp_2layer.onnx --function mlp_2layer \
+  --label base --from-phase executable-configurations --to-phase executable-targets \
+  --pass iree-amdaie-lower-to-aie
+#   -> debug_out/mlp_2layer_base/resume/executable-configurations_to_executable-targets.mlir
+#      debug_out/mlp_2layer_base/resume/passes/…  (해당 패스 before/after)
+```
+
+- `--from-phase X`는 baseline(같은 `--label`)의 `phases/N.X.mlir`을 입력으로 `--compile-from=X`를 실행한다.
+  `--to-phase Y`(기본 `executable-targets`)가 `--compile-to=Y`로 정지점을 정한다.
+- 재개 모드는 IR 전용이라 NPU 실행/비교를 하지 않고, baseline 산출물(`phases/`, `model.vmfb`)을 덮어쓰지 않는다.
+  결과는 `resume/` 아래에 쌓인다. baseline 덤프가 없으면 먼저 full 모드로 만들라고 에러를 낸다.
+- 수정한 패스가 도는 구간을 골라 `--from/--to-phase`를 준다. AIE 코드젠 패스는 대개
+  `executable-configurations → executable-targets` 구간이다.
+
+### 수치까지 검증하려면 (수동)
+재개 모드는 IR만 본다. 패스 수정 후 **NPU 출력 수치**까지 확인하려면 (a) full 모드로 재실행하거나,
+(b) 덤프한 phase IR에서 vmfb까지 이어 컴파일한 뒤 실행한다(프론트엔드 skip):
+```bash
+# 컨테이너 안. <dir> = debug_out/<model>_<label>
+iree-compile <dir>/phases/9.executable-configurations.mlir \
+  --iree-hal-target-backends=amd-aie --iree-amdaie-target-device=npu4 \
+  --iree-amd-aie-peano-install-dir=$PEANO_INSTALL_DIR --iree-amdaie-stack-size=2048 \
+  --compile-from=executable-configurations -o /tmp/resumed.vmfb
+iree-run-module --device=amdxdna --module=/tmp/resumed.vmfb --function=mlp_2layer \
+  --input=@x.npy --input=@w1.npy --input=@w2.npy --output=@/tmp/out0.npy
+```
+
+## phase 덤프/재개 플래그 (배경)
+
+- `--dump-compilation-phases-to=<dir>`: full 컴파일 1회가 각 phase 종료 시 `<dir>/N.<phase>.mlir`을
+  자동 저장한다(`N` = `IREEVMPipelinePhase` 순번). HAL 서브페이즈(executable-sources/configurations/targets)도
+  포함된다. → phase별로 `--compile-to`를 여러 번 돌릴 필요가 없다.
+- `--compile-from=X`: X **이전** phase는 모두 skip하고 X **다음**부터 실행한다. 즉 "X phase의 출력물"인
+  `N.X.mlir`을 입력으로 주고 `--compile-from=X`를 붙이면 그 다음 구간이 이어서 돈다.
+  `--compile-to=Y`와 조합해 X~Y 구간만 실행할 수 있다(`compile-from < compile-to` 필수).
+
 ## 재현
 
-`MANIFEST.txt`의 각 명령은 그대로 복붙 실행하면 동일 산출물을 재생성한다. 특정 단계만 다시
-보고 싶을 때 해당 `iree-compile … --compile-to=<phase>` 줄만 실행하면 된다.
+`MANIFEST.txt`(및 `resume/MANIFEST.txt`)의 각 명령은 그대로 복붙 실행하면 동일 산출물을 재생성한다.
+특정 phase 단독은 `iree-compile … --compile-to=<phase>`, 특정 구간은
+`iree-compile <phases/N.X.mlir> --compile-from=X --compile-to=Y` 줄만 실행하면 된다.
