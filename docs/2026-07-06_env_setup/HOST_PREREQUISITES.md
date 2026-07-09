@@ -37,8 +37,10 @@ dev/배포 컨테이너를 쓰기 **전에 호스트를 준비**하는 문서다
 # (권장) 공식 설치 스크립트 — 한 줄, 최신 Docker Engine
 curl -fsSL https://get.docker.com | sudo sh
 
-# 설치 후 공통: sudo 없이 쓰려면 docker 그룹에 추가 (재로그인 필요)
+# 설치 후 공통: sudo 없이 쓰려면 docker 그룹에 추가
 sudo usermod -aG docker "$USER"
+newgrp docker    # 현재 셸에 즉시 적용 (또는 완전 로그아웃 후 재로그인; 새 터미널 창만으론 부족)
+# 확인: `docker info`가 sudo 없이 되면 OK. 안 되면 재로그인 후 다시.
 ```
 > 더 간단히 Ubuntu 기본 패키지도 가능: `sudo apt-get install -y docker.io` (버전은 낮지만 이 프로젝트의
 > `docker build`/`docker run`엔 충분). 공식 apt 저장소를 직접 등록하는 다단계 방식도 있으나(키링+repo
