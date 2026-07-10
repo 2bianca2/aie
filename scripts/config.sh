@@ -2,7 +2,12 @@
 # Shared config, sourced by the other scripts. Every value is overridable via env var.
 # (No `set -e` here — this file is sourced.)
 
-IMAGE_DEV="${IMAGE_DEV:-iree-amd-aie:dev}"
+# dev image tag is per-user ($(id -un) suffix): the Docker daemon is shared
+# system-wide (rootful), so a fixed tag would let one user's `build-dev.sh`
+# silently reassign `iree-amd-aie:dev` for everyone on the host. Overridable.
+IMAGE_DEV="${IMAGE_DEV:-iree-amd-aie:dev-$(id -un)}"
+# IMAGE_DEPLOY stays shared: it is a lab-wide canonical deploy image built from a
+# single agreed commit, so one shared tag per machine is intended (not a conflict).
 IMAGE_DEPLOY="${IMAGE_DEPLOY:-iree-amd-aie:deploy}"
 REPO_URL="${REPO_URL:-https://github.com/ace-knu/iree-amd-aie.git}"
 BRANCH="${BRANCH:-dev}"

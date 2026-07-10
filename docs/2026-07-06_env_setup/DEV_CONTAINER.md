@@ -99,7 +99,10 @@ bash build_tools/download_peano.sh
 ### 방법 B: CLI
 ```bash
 cd ~/Projects/iree-amd-aie
-docker build --target dev -t iree-amd-aie:dev .
+# dev 이미지 태그는 유저별로 붙인다(-$(id -un)). Docker 데몬은 호스트에서 공유되므로 고정 태그면
+# 한 유저의 재빌드가 남의 iree-amd-aie:dev 태그를 덮어쓴다. scripts/config.sh 기본값과 동일.
+IMG=iree-amd-aie:dev-$(id -un)
+docker build --target dev -t "$IMG" .
 
 # NPU 디바이스 노드는 인덱스 기반(accelN)이라 고정 보장이 아니다. 먼저 확인:
 #   ls /dev/accel/        (단일 NPU면 보통 accel0; 여러 개면 다를 수 있음)
@@ -111,7 +114,7 @@ docker run --rm -it \
   -v ~/Projects/iree-amd-aie:/workspace \
   -e HOME=/workspace \
   -e PEANO_INSTALL_DIR=/workspace/llvm-aie \
-  iree-amd-aie:dev bash
+  "$IMG" bash
 # --user "$(id -u):$(id -g)": 호스트 사용자 uid/gid로 실행 → 생성 파일이 본인 소유(uid 1000 아니어도 OK).
 #   (본인이 clone한 소스라 소유자와 uid가 일치해 쓰기 정상. -e HOME=/workspace 는 임의 uid에서 ccache 등 HOME 의존 도구 대비.)
 # -v /etc/passwd:ro -v /etc/group:ro: uid/gid를 컨테이너 안에서 '이름'으로 해석 (uid≠1000일 때
@@ -229,11 +232,24 @@ build/tools/iree-run-module --device=amdxdna --module=model.vmfb \
   필요하다. recursive clone이 이를 포함한다.
 - **제약 호스트(노트북 등)에서의 자원 제한**: 이 빌드는 LLVM 포함이라 전 코어를 오래 100%로 점유한다.
   코어가 적거나 발열/응답성이 걱정되는 호스트(예: 노트북)에서는 `-j`를 낮추고 컨테이너 CPU를 제한한다.
-  예: `docker run --cpus=6 ... iree-amd-aie:dev bash -lc 'nice -n 19 cmake --build build -j 6'`.
+  예: `docker run --cpus=6 ... iree-amd-aie:dev-$(id -un) bash -lc 'nice -n 19 cmake --build build -j 6'`.
   이는 **실행 단위(per-run) 선택**일 뿐 이미지/`devcontainer.json`에는 넣지 않는다(빌드 서버는 풀 병렬 사용).
   (구축 당시 실측: `-j 24` 풀 병렬은 12코어/24스레드 노트북에서 CPU 기아 + RAM 초과로 먹통/강제종료 —
   `nproc`는 SMT 스레드(24)를 세므로 `nproc-2`도 과다다. LLVM 컴파일은 잡당 ~2-4GB라 RAM이 병목이다.
   그래서 config.sh는 `min(6, nproc-2, RAM_GB/4)`로 캡한다. `--cpus=6 -j 6`으로 응답성 유지하며 정상 진행.)
+- **한 호스트를 여러 유저가 공유할 때**: rootful Docker는 데몬이 시스템 전역 하나라 이미지 태그
+  네임스페이스를 전 유저가 공유한다. 그래서:
+  - **dev 이미지 태그는 유저별**(`iree-amd-aie:dev-$(id -un)`, `config.sh` 기본값)이다. dev는 소스를
+    굽지 않아 같은 브랜치면 이미지가 동일하지만, 유저마다 브랜치(Dockerfile)가 다르거나 한 유저가
+    재빌드하면 고정 태그는 남의 `iree-amd-aie:dev`를 조용히 덮어쓴다. 유저별 태그로 이를 없앤다
+    (`IMAGE_DEV=...`로 override 가능).
+  - **deploy 이미지 태그는 공유(`iree-amd-aie:deploy`)로 둔다** — 연구실이 정한 커밋 하나로 빌드해
+    넘기는 canonical 이미지라 머신당 하나가 의도다. 단 `build-deploy.sh`/`load-deploy.sh`는 그 공유
+    태그를 덮어쓰므로, 서로 다른 커밋을 굽는 경우엔 `IMAGE_DEPLOY=...`로 구분한다.
+  - **NPU는 물리 디바이스 1개**(`/dev/accel/accel0`)다. 두 유저가 `run-deploy.sh`/`run-debug.sh`로
+    실제 NPU 실행을 동시에 하면 경합해 실패/행 가능 — **NPU 실행은 한 번에 한 유저**로 조율한다
+    (빌드만이면 무관). 두 유저의 동시 LLVM 빌드는 `-j` 캡이 유저별 독립이라 합산 RAM 초과 위험이
+    있으니 공유 시 `JOBS`를 낮춘다.
 
 ---
 
