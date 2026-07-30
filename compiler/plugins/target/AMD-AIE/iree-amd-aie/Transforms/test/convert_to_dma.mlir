@@ -362,3 +362,38 @@ func.func @permute_unpack_tricyle_permute(){
   linalg.unpack %src outer_dims_perm = [1, 2, 0] inner_dims_pos = [0, 1, 2] inner_tiles = [5, 5, 5] into %dst : memref<4x2x6x5x5x5xf32, 2> -> memref<30x20x10xf32, 1>
   return
 }
+
+// -----
+
+// A subview whose source memref carries a non-zero base offset -- here a buffer
+// packed at a byte offset in a shared pool, so the offset is dynamic in the
+// memref type but a constant `offset(%c2048)` on the backing subspan -- is
+// rebased to offset 0 with a `memref.reinterpret_cast` on the same
+// subspan-backed source (preserving the def-use chain to the subspan), and the
+// delinearized base offset (2048 bytes / 4 = 512 elems = 8 * stride 64) is
+// folded into the DMA access pattern with an `arith.addi` on the dynamic
+// subview offset.
+
+// CHECK-LABEL: @nonzero_base_offset_pack
+// CHECK: %[[REINT:.*]] = memref.reinterpret_cast %{{.*}} to offset: [0], sizes: [40, 8, 8], strides: [64, 8, 1]
+// CHECK: %[[FROMREINT:.*]] = amdaie.logicalobjectfifo.from_memref %[[REINT]]
+// CHECK: %[[OFF:.*]] = arith.addi %arg0, %c8{{.*}}
+// CHECK: amdaie.dma_cpy_nd
+// CHECK-SAME: %[[FROMREINT]][%[[OFF]], 0, 0, %{{.*}}, 0]
+#pipeline_layout = #hal.pipeline.layout<bindings = [#hal.pipeline.binding<storage_buffer, "ReadOnly|Indirect">]>
+func.func @nonzero_base_offset_pack() {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %c8 = arith.constant 8 : index
+  %c32 = arith.constant 32 : index
+  %c64 = arith.constant 64 : index
+  %c2048 = arith.constant 2048 : index
+  %0 = hal.interface.binding.subspan layout(#pipeline_layout) binding(0) alignment(64) offset(%c2048) flags("ReadOnly|Indirect") : memref<32x8x8xf32, strided<[64, 8, 1], offset: ?>>
+  scf.parallel (%arg0, %arg1, %arg2) = (%c0, %c0, %c0) to (%c32, %c8, %c64) step (%c1, %c8, %c64) {
+    %subview = memref.subview %0[%arg0, %arg1, 0] [1, 8, 8] [1, 1, 1] : memref<32x8x8xf32, strided<[64, 8, 1], offset: ?>> to memref<1x8x8xf32, strided<[64, 8, 1], offset: ?>>
+    %alloc = memref.alloc() : memref<1x1x1x8x8xf32, 1>
+    linalg.pack %subview inner_dims_pos = [1, 2] inner_tiles = [8, 8] into %alloc : memref<1x8x8xf32, strided<[64, 8, 1], offset: ?>> -> memref<1x1x1x8x8xf32, 1>
+    scf.reduce
+  }
+  return
+}
