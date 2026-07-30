@@ -48,6 +48,7 @@ iree_cc_library(
     "AMDAIEAssignBufferAddress.cpp"
     "AMDAIEAssignChannels.cpp"
     "AMDAIEAssignConnectionTypes.cpp"
+    "AMDAIEAssignDeviceAffinities.cpp"
     "AMDAIEAssignLogicalObjectFifoDepth.cpp"
     "AMDAIEAssignNpuDmaBdIds.cpp"
     "AMDAIEAssignPacketIds.cpp"
@@ -127,8 +128,10 @@ iree_cc_library(
     ::PassesIncGen
     iree::compiler::Codegen::Common::TransformDialectInterpreterPass
     iree::compiler::Codegen::Dialect::Codegen::IR::IREECodegenDialect
+    iree::compiler::Dialect::Flow::IR
     iree::compiler::Dialect::HAL::IR
     iree::compiler::Dialect::HAL::IR::HALDialect
+    iree::compiler::Dialect::Util::IR
     iree::compiler::Dialect::LinalgExt::IR
     iree::compiler::Dialect::LinalgExt::Transforms
     iree::compiler::Utils

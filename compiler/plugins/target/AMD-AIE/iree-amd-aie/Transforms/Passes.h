@@ -80,6 +80,10 @@ std::unique_ptr<Pass> createAMDAIEAcquireReleaseToUseLockPass();
 /// Create a pass to assign channels to connections.
 std::unique_ptr<Pass> createAMDAIEAssignChannelsPass();
 
+/// Create a pass to assign per-dispatch device affinities (contraction/conv ->
+/// NPU, everything else -> CPU) for heterogeneous CPU+NPU execution.
+std::unique_ptr<Pass> createAMDAIEAssignDeviceAffinitiesPass();
+
 /// Create a pass to assign types to `amdaie.connection` ops.
 std::unique_ptr<Pass> createAMDAIEAssignConnectionTypesPass(
     AMDAIEAssignConnectionTypesOptions options = {});

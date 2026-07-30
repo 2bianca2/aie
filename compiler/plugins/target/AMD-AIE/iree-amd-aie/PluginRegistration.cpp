@@ -15,6 +15,7 @@
 #include "iree-amd-aie/Target/AIETarget.h"
 #include "iree-amd-aie/Transforms/Passes.h"
 #include "iree/compiler/Dialect/HAL/Target/TargetRegistry.h"
+#include "iree/compiler/GlobalOptimization/Passes.h"
 #include "iree/compiler/PluginAPI/Client.h"
 
 namespace mlir::iree_compiler {
@@ -50,6 +51,30 @@ struct AMDAIESession
     registry.insert<AMDAIE::AMDAIEDialect, xilinx::AIE::AIEDialect,
                     aievec::AIEVecDialect, xilinx::AIEX::AIEXDialect,
                     xilinx::air::airDialect>();
+  }
+
+  void extendPreprocessingPassPipeline(OpPassManager &passManager) override {
+    // Demote contraction (matmul + conv) inputs f32 -> bf16 before the named
+    // ops are generalized (the upstream demote pass only matches named ops).
+    // npu4 has no f32 vector path, so this is required to run f32 models.
+    if (options.demoteContractionInputsToBf16) {
+      passManager.addPass(GlobalOptimization::createDemoteContractionInputsPass(
+          GlobalOptimization::DemoteType::BF16,
+          GlobalOptimization::DemoteOperation::All));
+    }
+    // Inject the device topology now, while both device globals still exist
+    // (an unused CPU device global would otherwise be DCE'd before the Flow
+    // phase). The topology's symbol references keep the CPU device global
+    // alive through SymbolDCE. No dispatches exist yet, so no affinity is set
+    // here. No-op unless both an amd-aie and an llvm-cpu device are declared.
+    passManager.addPass(AMDAIE::createAMDAIEAssignDeviceAffinitiesPass());
+  }
+
+  void extendFlowTransformPassPipeline(OpPassManager &passManager) override {
+    // Heterogeneous placement: pin contraction/conv dispatches to the amd-aie
+    // (NPU) device and everything else (transposes, casts) to the CPU device.
+    // No-op unless both an amd-aie and an llvm-cpu device are declared.
+    passManager.addPass(AMDAIE::createAMDAIEAssignDeviceAffinitiesPass());
   }
 
   void populateHALTargetDevices(IREE::HAL::TargetDeviceList &targets) override {

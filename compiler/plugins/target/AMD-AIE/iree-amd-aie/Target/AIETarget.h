@@ -56,6 +56,13 @@ struct AMDAIEOptions {
       LowerToAIEPassPipeline::ObjectFifo};
   TilePassPipeline useTilePipeline{TilePassPipeline::PackPeelPipeline};
   bool enableVectorizationPasses{true};
+
+  // Demote the inputs of contraction ops (matmul + convolution) from f32 to
+  // bf16 during preprocessing; accumulation stays f32. npu4 (AIE2P) has no f32
+  // vector path, so f32 conv aborts and f32 matmul only runs scalar; demoting
+  // makes them run as bf16. Applied in preprocessing (before named ops are
+  // generalized) because the upstream demote pass only matches named ops.
+  bool demoteContractionInputsToBf16{false};
   bool enableCoalescingLoops{false};
   bool enableCollapsingUnitDims{false};
   OutliningStrategy enableFunctionOutlining{OutliningStrategy::Balanced};
@@ -150,6 +157,14 @@ struct AMDAIEOptions {
     binder.opt<bool>("iree-amd-aie-enable-chess", useChess,
                      llvm::cl::cat(category),
                      llvm::cl::desc("Use the legacy chess compiler"));
+
+    binder.opt<bool>(
+        "iree-amdaie-demote-contraction-inputs-to-bf16",
+        demoteContractionInputsToBf16, llvm::cl::cat(category),
+        llvm::cl::desc(
+            "Demote the inputs of contraction ops (matmul + convolution) from "
+            "f32 to bf16 during preprocessing (accumulation stays f32). Needed "
+            "to run f32 models on npu4, which has no f32 vector path."));
 
     binder.opt<bool>(
         "iree-amd-aie-enable-chess-for-ukernel", useChessForUKernel,

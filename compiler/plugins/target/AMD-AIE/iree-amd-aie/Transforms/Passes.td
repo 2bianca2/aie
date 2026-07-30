@@ -80,6 +80,13 @@ def AMDAIEAssignConnectionTypes :
 
 }
 
+def AMDAIEAssignDeviceAffinities :
+    Pass<"iree-amdaie-assign-device-affinities", "ModuleOp"> {
+  let summary = "Pin each flow.dispatch to a device (contraction/conv -> NPU, else -> CPU) for heterogeneous CPU+NPU execution.";
+  let constructor =
+      "mlir::iree_compiler::AMDAIE::createAMDAIEAssignDeviceAffinitiesPass()";
+}
+
 def AMDAIEAssignLogicalObjectFifoDepth :
     Pass<"iree-amdaie-assign-logical-objectfifo-depth", ""> {
   let summary = "Assign a buffer depth of the logical objectfifos.";

@@ -14,6 +14,7 @@ iree_cc_library(
     "PluginRegistration.cpp"
   DEPS
     iree::compiler::Dialect::HAL::Target
+    iree::compiler::GlobalOptimization
     iree::compiler::PluginAPI
     iree::target::amd-aie::IR::AMDAIEDialect
     iree::target::amd-aie::Target
