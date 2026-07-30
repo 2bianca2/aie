@@ -26,6 +26,7 @@
   ignore = dirty
 [submodule "third_party/iree"]
   path = third_party/iree
-  url = https://github.com/iree-org/iree.git
+	url = https://github.com/ace-knu/iree.git
   shallow = true
   ignore = dirty
+	branch = amd-aie-flow-hook
