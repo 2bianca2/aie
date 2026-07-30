@@ -246,9 +246,17 @@ AIE::ShimDMAAllocationOp AIEDeviceBuilder::createShimDmaAllocation(
       dmaChannelDir, channel, getConstantIndexOrAssert(tileOp.getCol()));
   rewriter.setInsertionPointToStart(deviceBlock);
   StringRef symName = shimDmaAllocOp.getSymName();
+  // A `memref.global` declares plain storage and cannot carry a strided/offset
+  // layout (it fails LLVM translation otherwise). The shim buffer's memref may
+  // carry a non-zero base offset (a constant/transient packed at an offset in a
+  // shared pool); that offset is folded into the DMA access pattern by
+  // AMDAIEConvertToDma, so the global only needs the shape and element type.
+  auto shimGlobalType =
+      MemRefType::get(memrefType.getShape(), memrefType.getElementType(),
+                      MemRefLayoutAttrInterface{}, memrefType.getMemorySpace());
   rewriter.create<memref::GlobalOp>(rewriter.getUnknownLoc(), symName,
                                     rewriter.getStringAttr("public"),
-                                    memrefType, nullptr, false, nullptr);
+                                    shimGlobalType, nullptr, false, nullptr);
   return shimDmaAllocOp;
 }
 

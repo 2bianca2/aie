@@ -64,8 +64,16 @@ struct HalfDmaCpyNdToNpuConverter final
         return op.emitOpError() << "expected input to be an "
                                    "`amdaie.logicalobjectfifo.from_memref`";
       }
-      auto assumeAlignmentOp = dyn_cast_if_present<memref::AssumeAlignmentOp>(
-          logicalObjFifo.getMemref().getDefiningOp());
+      Value lofiMemref = logicalObjFifo.getMemref();
+      // Step through a `memref.reinterpret_cast` inserted by AMDAIEConvertToDma
+      // to rebase a non-zero base offset to 0; it preserves the def-use chain to
+      // the subspan (its source is the original subspan-backed memref).
+      if (auto reinterpretOp = dyn_cast_if_present<memref::ReinterpretCastOp>(
+              lofiMemref.getDefiningOp())) {
+        lofiMemref = reinterpretOp.getSource();
+      }
+      auto assumeAlignmentOp =
+          dyn_cast_if_present<memref::AssumeAlignmentOp>(lofiMemref.getDefiningOp());
 
       IREE::HAL::InterfaceBindingSubspanOp subspanOp;
       if (assumeAlignmentOp) {
@@ -73,7 +81,7 @@ struct HalfDmaCpyNdToNpuConverter final
             assumeAlignmentOp.getViewSource().getDefiningOp());
       } else {
         subspanOp = dyn_cast_if_present<IREE::HAL::InterfaceBindingSubspanOp>(
-            logicalObjFifo.getMemref().getDefiningOp());
+            lofiMemref.getDefiningOp());
       }
       if (!subspanOp) {
         return logicalObjFifo.emitOpError()

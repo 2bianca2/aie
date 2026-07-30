@@ -7,7 +7,9 @@
 #include "iree-amd-aie/IR/AMDAIEDialect.h"
 #include "iree-amd-aie/IR/AMDAIEOps.h"
 #include "iree-amd-aie/Transforms/Passes.h"
+#include "iree/compiler/Dialect/HAL/IR/HALOps.h"
 #include "llvm/Support/FormatVariadic.h"
+#include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
@@ -152,9 +154,90 @@ LogicalResult dmaTransposeOnHigherNumDims(PackOrUnpackOp packOrUnpackOp,
   return success();
 }
 
+/// Recovers the constant base offset (in elements) of a memref whose offset is
+/// typed dynamic but originates from a static `byte_offset` on the
+/// `hal.interface.binding.subspan` that backs it -- e.g. a weight packed at a
+/// non-zero offset in a shared constant pool. Walks the view-like defining-op
+/// chain to the subspan. Returns failure if no static offset can be recovered
+/// (no backing subspan, or a non-constant byte offset).
+static FailureOr<int64_t> recoverSubspanElementOffset(Value source) {
+  IREE::HAL::InterfaceBindingSubspanOp subspanOp;
+  Value cur = source;
+  while (Operation *def = cur.getDefiningOp()) {
+    if (auto subspan = dyn_cast<IREE::HAL::InterfaceBindingSubspanOp>(def)) {
+      subspanOp = subspan;
+      break;
+    }
+    if (auto assumeOp = dyn_cast<memref::AssumeAlignmentOp>(def)) {
+      cur = assumeOp.getViewSource();
+    } else if (auto reinterpretOp = dyn_cast<memref::ReinterpretCastOp>(def)) {
+      cur = reinterpretOp.getSource();
+    } else if (auto subviewOp = dyn_cast<memref::SubViewOp>(def)) {
+      cur = subviewOp.getSource();
+    } else {
+      break;
+    }
+  }
+  if (!subspanOp) return failure();
+  Value byteOffset = subspanOp.getByteOffset();
+  if (!byteOffset) return int64_t(0);
+  std::optional<int64_t> maybeByteOffset = getConstantIntValue(byteOffset);
+  if (!maybeByteOffset) return failure();
+  unsigned elemBitWidth =
+      cast<MemRefType>(source.getType()).getElementTypeBitWidth();
+  if (elemBitWidth == 0 || elemBitWidth % 8 != 0) return failure();
+  int64_t elemByteWidth = elemBitWidth / 8;
+  if (*maybeByteOffset % elemByteWidth != 0) return failure();
+  return *maybeByteOffset / elemByteWidth;
+}
+
+/// Handles a memref `source` whose non-zero base offset cannot be carried in the
+/// memref type (downstream `memref.global` shim buffers cannot have an offset).
+/// Recovers the static base offset, delinearizes it across the source `strides`
+/// into `perDim` contributions, and rebases the source to an offset-0 memref
+/// (returned via `rebasedOp`). The caller folds `perDim` into the DMA per-dim
+/// offsets so the offset lives in the DMA access pattern instead.
+static LogicalResult rebaseSourceToZeroOffset(IRRewriter &rewriter, Value source,
+                                              ArrayRef<int64_t> strides,
+                                              SmallVector<int64_t> &perDim,
+                                              Operation *&rebasedOp) {
+  if (llvm::any_of(strides,
+                   [](int64_t s) { return ShapedType::isDynamic(s); })) {
+    return failure();
+  }
+  FailureOr<int64_t> maybeOffset = recoverSubspanElementOffset(source);
+  if (failed(maybeOffset)) return failure();
+  int64_t remaining = *maybeOffset;
+  perDim.assign(strides.size(), 0);
+  for (unsigned i = 0; i < strides.size(); ++i) {
+    if (strides[i] == 0) continue;
+    perDim[i] = remaining / strides[i];
+    remaining = remaining % strides[i];
+  }
+  MLIRContext *ctx = source.getContext();
+  Location loc = source.getLoc();
+  ArrayRef<int64_t> srcShape = cast<MemRefType>(source.getType()).getShape();
+  SmallVector<int64_t> rebaseShape(srcShape.size());
+  for (unsigned i = 0; i < srcShape.size(); ++i)
+    rebaseShape[i] = perDim[i] + srcShape[i];
+  // Rebase to offset 0 by reinterpreting the SAME subspan-backed source (not its
+  // extracted base buffer): this keeps the def-use chain to the
+  // `hal.interface.binding.subspan` intact so downstream passes can still
+  // recover the binding ordinal. reinterpret_cast uses the source's aligned
+  // (allocation) base pointer, so offset 0 points at the buffer base; the
+  // delinearized offset is carried by the DMA per-dim offsets instead.
+  auto rebased = rewriter.create<memref::ReinterpretCastOp>(
+      loc, source,
+      /*offset=*/getAsIndexOpFoldResult(ctx, int64_t(0)),
+      getAsIndexOpFoldResult(ctx, rebaseShape),
+      getAsIndexOpFoldResult(ctx, SmallVector<int64_t>(strides)));
+  rebasedOp = rebased.getOperation();
+  return success();
+}
+
 /// Examines an input/output of a pack/unpack op and provides the
 /// corresponding offsets, sizes and strides required by the dma op.
-LogicalResult setDmaInputs(Operation *&operandOp,
+LogicalResult setDmaInputs(IRRewriter &rewriter, Operation *&operandOp,
                            SmallVector<OpFoldResult> &offsets,
                            SmallVector<OpFoldResult> &sizes,
                            SmallVector<OpFoldResult> &strides) {
@@ -163,13 +246,6 @@ LogicalResult setDmaInputs(Operation *&operandOp,
       isa<memref::AssumeAlignmentOp>(operandOp)) {
     MemRefType memRefType = cast<MemRefType>(operandOp->getResult(0).getType());
     auto [stridesI64, baseOffset] = memRefType.getStridesAndOffset();
-    if (baseOffset != 0) {
-      auto message = llvm::formatv(
-          "with non-zero base offset {0} is not supported by the "
-          "current pass, requires testing and possible code changes.",
-          baseOffset);
-      return operandOp->emitOpError(message);
-    }
     strides = getAsIndexOpFoldResult(ctx, stridesI64);
     auto sizesI64 = memRefType.getShape();
     if (llvm::any_of(sizesI64, [](int64_t size) {
@@ -179,6 +255,24 @@ LogicalResult setDmaInputs(Operation *&operandOp,
           "with dynamic shape is not supported by dma op.");
     }
     sizes = getAsIndexOpFoldResult(ctx, sizesI64);
+    if (baseOffset != 0) {
+      // The whole buffer is DMA'd from a non-zero base offset (e.g. a buffer
+      // packed in a shared pool). Rebase to offset 0 and move the base offset
+      // into the DMA per-dim offsets.
+      Value source = operandOp->getResult(0);
+      SmallVector<int64_t> perDim;
+      Operation *rebasedOp = nullptr;
+      if (failed(rebaseSourceToZeroOffset(rewriter, source, stridesI64, perDim,
+                                          rebasedOp))) {
+        return operandOp->emitOpError(llvm::formatv(
+            "has a non-zero base offset {0} that could not be recovered from a "
+            "backing subspan; not supported by this pass.",
+            baseOffset));
+      }
+      operandOp = rebasedOp;
+      for (int64_t p : perDim) offsets.push_back(getAsIndexOpFoldResult(ctx, p));
+      return success();
+    }
     // Alloc Op has no offsets.
     for (int i = 0; i < sizes.size(); i++) {
       offsets.push_back(getAsIndexOpFoldResult(ctx, 0));
@@ -198,16 +292,45 @@ LogicalResult setDmaInputs(Operation *&operandOp,
     offsets = subviewOp.getMixedOffsets();
     MemRefType subviewType = subviewOp.getSource().getType();
     auto [stridesI64, baseOffset] = subviewType.getStridesAndOffset();
-    if (baseOffset != 0) {
-      auto message = llvm::formatv(
-          "has non-zero base offset {0} that is not supported by the "
-          "current pass: requires testing and possible code changes.",
-          baseOffset);
-      return subviewOp->emitOpError(message);
-    }
     strides = getAsIndexOpFoldResult(ctx, stridesI64);
     operandOp = subviewOp.getSource().getDefiningOp();
     sizes = subviewOp.getMixedSizes();
+
+    // A non-zero/dynamic base offset on the subview source (e.g. a buffer packed
+    // at a non-zero offset in a shared constant pool) cannot be carried in the
+    // memref type -- downstream `memref.global` shim buffers cannot have an
+    // offset. Rebase the source to an offset-0 memref and fold the base offset
+    // into the per-dimension DMA offsets, so the offset lives in the DMA access
+    // pattern instead. Only a statically-recoverable offset is handled.
+    if (baseOffset != 0) {
+      SmallVector<int64_t> perDim;
+      Operation *rebasedOp = nullptr;
+      if (failed(rebaseSourceToZeroOffset(rewriter, subviewOp.getSource(),
+                                          stridesI64, perDim, rebasedOp))) {
+        return subviewOp->emitOpError(
+            "has a non-zero base offset that could not be recovered from a "
+            "backing subspan; not supported by this pass.");
+      }
+      operandOp = rebasedOp;
+      // Fold the delinearized base offset into the subview offsets. A static
+      // subview offset folds into a constant; a dynamic one (e.g. a tiling
+      // induction variable) gets an arith.addi of the static contribution.
+      Location loc = subviewOp.getLoc();
+      for (unsigned i = 0; i < offsets.size() && i < perDim.size(); ++i) {
+        if (perDim[i] == 0) continue;
+        std::optional<int64_t> cur = getConstantIntValue(offsets[i]);
+        if (cur) {
+          offsets[i] = getAsIndexOpFoldResult(ctx, *cur + perDim[i]);
+        } else {
+          Value dynOffset = cast<Value>(offsets[i]);
+          Value contribution =
+              rewriter.create<arith::ConstantIndexOp>(loc, perDim[i]);
+          offsets[i] =
+              rewriter.create<arith::AddIOp>(loc, dynOffset, contribution)
+                  .getResult();
+        }
+      }
+    }
     if (llvm::any_of(sizes, [](OpFoldResult fr) {
           return !getConstantIntValue(fr).has_value();
         })) {
@@ -269,7 +392,8 @@ LogicalResult rewriteAsDma(IRRewriter &rewriter, PackOrUnpackOp op, Value input,
   SmallVector<OpFoldResult> srcOffsets;
   SmallVector<OpFoldResult> srcStrides;
   SmallVector<OpFoldResult> srcShape;
-  if (failed(setDmaInputs(sourceOp, srcOffsets, srcShape, srcStrides))) {
+  if (failed(setDmaInputs(rewriter, sourceOp, srcOffsets, srcShape,
+                          srcStrides))) {
     return failure();
   }
 
@@ -277,7 +401,7 @@ LogicalResult rewriteAsDma(IRRewriter &rewriter, PackOrUnpackOp op, Value input,
   SmallVector<OpFoldResult> dstOffsets;
   SmallVector<OpFoldResult> dstStrides;
   SmallVector<OpFoldResult> dstShape;
-  if (failed(setDmaInputs(dstOp, dstOffsets, dstShape, dstStrides))) {
+  if (failed(setDmaInputs(rewriter, dstOp, dstOffsets, dstShape, dstStrides))) {
     return failure();
   }
 
