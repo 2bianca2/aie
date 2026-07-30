@@ -1337,6 +1337,22 @@ LogicalResult generateUnifiedObject(
     llvmModule->print(rso, nullptr);
   }
 
+  // Peano (llvm-aie) is an older LLVM fork that cannot parse the
+  // `nocreateundeforpoison` function attribute. Host LLVM stamps it onto math
+  // intrinsic declarations during `translateModuleToLLVMIR` (e.g. relu's
+  // `arith.maximumf` lowers to an fmax intrinsic), so it is absent at the MLIR
+  // level and cannot be removed by an MLIR pass; strip it from the textual IR
+  // before peano ingests it. Removing a function attribute is semantically
+  // safe. This mirrors createAMDAIERemoveWrapFlagFromGepPass and should be
+  // removed once peano is rebased onto a newer point in llvm-project.
+  {
+    const std::string kUnparsableAttr = " nocreateundeforpoison";
+    size_t pos = 0;
+    while ((pos = inputLLStr.find(kUnparsableAttr, pos)) != std::string::npos) {
+      inputLLStr.erase(pos, kUnparsableAttr.size());
+    }
+  }
+
   if (useChess) {
     FailureOr<Path> maybeVitisDir = findVitis(vitisDir, npuVersion);
     if (failed(maybeVitisDir)) return failure();
