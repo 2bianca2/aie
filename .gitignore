@@ -62,6 +62,9 @@ imgui.ini
 compile_commands.json
 .cache/clangd
 
+# Build tool caches (ccache, pip, etc.)
+/.cache/
+
 # Language server configuration files
 .clangd
 

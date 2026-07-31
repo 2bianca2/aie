@@ -108,21 +108,25 @@ build/tools/iree-run-module --device=amdxdna --module=model.vmfb \
 <details>
 <summary><b>번들 예시 모델로 셋업 확인</b> — <code>models/mlp_2layer</code></summary>
 
-> 2-layer MLP: `MatMul(x,w1) → Relu → MatMul(_,w2)` (bias 없음, 가중치도 런타임 입력, f32 128×128).
+> 2-layer MLP: `MatMul(x,w1) → Relu → MatMul(_,w2)` (bias 없음, 가중치는 상수, f32 128×128).
 >
 > ```bash
 > cd /workspace/models/mlp_2layer
+> python export_mlp_2layer.py                    # mlp_2layer.onnx 생성 (가중치 상수)
 > python -m iree.compiler.tools.import_onnx mlp_2layer.onnx -o mlp_2layer.mlir
-> /workspace/build/tools/iree-compile --iree-hal-target-backends=amd-aie --iree-amdaie-target-device=npu4 \
->   --iree-amd-aie-peano-install-dir=/workspace/llvm-aie --iree-amdaie-stack-size=2048 \
->   mlp_2layer.mlir -o mlp_2layer.vmfb
-> # 함수명 mlp_2layer, 입력 3개(x,w1,w2=128x128xf32). 상수 1.0 입력이면 각 원소 16384가 나와야 정상.
-> /workspace/build/tools/iree-run-module --device=amdxdna --module=mlp_2layer.vmfb \
->   --function=mlp_2layer --input="128x128xf32=1" --input="128x128xf32=1" --input="128x128xf32=1"
+> /workspace/build/tools/iree-compile mlp_2layer.mlir \
+>   --iree-hal-target-device=npu=amdxdna --iree-hal-target-device=cpu=local \
+>   --iree-hal-local-target-device-backends=llvm-cpu --iree-hal-default-device=npu \
+>   --iree-amdaie-target-device=npu4 --iree-amd-aie-peano-install-dir=/workspace/llvm-aie \
+>   --iree-amdaie-demote-contraction-inputs-to-bf16 --iree-amdaie-enable-vectorization-passes=false \
+>   -o mlp_2layer.vmfb
+> # 함수 mlp_2layer, 입력 1개(x=128x128xf32)
+> /workspace/build/tools/iree-run-module --device=amdxdna --device=local-task \
+>   --module=mlp_2layer.vmfb --function=mlp_2layer --input="128x128xf32=1" --output=@out.npy
 > ```
 >
-> 생성 스크립트: `models/mlp_2layer/export_mlp_2layer.py`. 정확도는 `--output=@out.npy`로 받아
-> numpy `relu(x@w1)@w2`와 비교.
+> 생성 스크립트: `models/mlp_2layer/export_mlp_2layer.py`. 정확도까지 확인하려면 같은 모델을 CPU로도
+> 컴파일(`--iree-hal-target-backends=llvm-cpu`)해 golden과 비교한다 (`scripts/debug/_verify_real_mlp.sh`).
 >
 > 컴파일 각 단계의 MLIR을 덤프해 변환 과정을 추적하려면 `./scripts/docker/run-debug.sh`
 > (도구 `scripts/debug/pipeline_dump.py`) — 상세는 [`DEBUG_PIPELINE.md`](DEBUG_PIPELINE.md).
