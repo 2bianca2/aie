@@ -105,6 +105,7 @@ iree_cc_library(
     "AMDAIEObjFifoBufferization.cpp"
     "AMDAIEPackAndTranspose.cpp"
     "AMDAIEPad.cpp"
+    "AMDAIEPadContractionDispatches.cpp"
     "AMDAIEPeelForLoop.cpp"
     "AMDAIEPropagateDataLayout.cpp"
     "AMDAIERemoveMemorySpace.cpp"
@@ -129,6 +130,7 @@ iree_cc_library(
     iree::compiler::Codegen::Common::TransformDialectInterpreterPass
     iree::compiler::Codegen::Dialect::Codegen::IR::IREECodegenDialect
     iree::compiler::Dialect::Flow::IR
+    iree::compiler::Dialect::TensorExt::IR
     iree::compiler::Dialect::HAL::IR
     iree::compiler::Dialect::HAL::IR::HALDialect
     iree::compiler::Dialect::Util::IR

@@ -87,6 +87,13 @@ std::optional<int64_t> getConfigNumRows(
   return attr->getInt();
 }
 
+int64_t getPackPeelReductionTile(int64_t kPackScaleL1) {
+  // The base L2 reduction (K) tile the pack-peel pipeline packs by. Empirically
+  // best at 32 for bf16 (device-independent tuning constant); the 4-level
+  // variant scales it (`kPackScaleL1 == 2`). See KernelDispatch `k0Pack`.
+  return kPackScaleL1 * 32;
+}
+
 /// Utility to retrieve a constant index from an OpFoldResult.
 int64_t getConstantIndexOrAssert(OpFoldResult ofr) {
   std::optional<int64_t> res = getConstantIntValue(ofr);

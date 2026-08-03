@@ -315,7 +315,8 @@ FailureOr<ParameterSetting> ParameterSetting::create(
   // TODO: fix vectorization path to use larger k tile size.
   uint32_t k0Pack =
       enableAMDAIEUkernels == "none"
-          ? std::min(static_cast<int>(kPackScaleL1 * 32), static_cast<int>(K))
+          ? std::min(static_cast<int>(getPackPeelReductionTile(kPackScaleL1)),
+                     static_cast<int>(K))
           : maxL0SizeK;
 
   return ParameterSetting(M0, N0, K0, m0Pack, n0Pack, k0Pack, m1Pack, n1Pack,

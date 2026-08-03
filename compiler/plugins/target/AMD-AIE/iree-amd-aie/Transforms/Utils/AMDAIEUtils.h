@@ -41,6 +41,14 @@ std::optional<int64_t> getConfigNumColumns(
 std::optional<int64_t> getConfigNumRows(
     IREE::HAL::ExecutableTargetAttr targetAttr);
 
+/// Returns the pack-peel L2 reduction (K) tile size. A matmul K dimension must
+/// be a multiple of this for the pack-peel codegen to tile it without a partial
+/// reduction tile. Single source of truth shared by `KernelDispatch` (which uses
+/// it as `k0Pack`) and the K-padding pass (which pads K up to a multiple of it).
+/// `kPackScaleL1` selects the pipeline variant (1 = default 2-level tiling,
+/// 2 = 4-level tiling).
+int64_t getPackPeelReductionTile(int64_t kPackScaleL1);
+
 /// Utility to retrieve a constant index from an OpFoldResult.
 int64_t getConstantIndexOrAssert(OpFoldResult ofr);
 

@@ -84,6 +84,11 @@ std::unique_ptr<Pass> createAMDAIEAssignChannelsPass();
 /// NPU, everything else -> CPU) for heterogeneous CPU+NPU execution.
 std::unique_ptr<Pass> createAMDAIEAssignDeviceAffinitiesPass();
 
+/// Create a pass to pad the operands of NPU contraction dispatches up to the
+/// target's pack-peel tile multiples (so divisibility holds inside the
+/// dispatch), inserting the padding at the Flow dispatch boundary.
+std::unique_ptr<Pass> createAMDAIEPadContractionDispatchesPass();
+
 /// Create a pass to assign types to `amdaie.connection` ops.
 std::unique_ptr<Pass> createAMDAIEAssignConnectionTypesPass(
     AMDAIEAssignConnectionTypesOptions options = {});

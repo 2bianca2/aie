@@ -87,6 +87,13 @@ def AMDAIEAssignDeviceAffinities :
       "mlir::iree_compiler::AMDAIE::createAMDAIEAssignDeviceAffinitiesPass()";
 }
 
+def AMDAIEPadContractionDispatches :
+    Pass<"iree-amdaie-pad-contraction-dispatches", "ModuleOp"> {
+  let summary = "Pad NPU contraction dispatch operands up to the target pack-peel tile multiples at the Flow dispatch boundary (target-known, via each dispatch's device affinity).";
+  let constructor =
+      "mlir::iree_compiler::AMDAIE::createAMDAIEPadContractionDispatchesPass()";
+}
+
 def AMDAIEAssignLogicalObjectFifoDepth :
     Pass<"iree-amdaie-assign-logical-objectfifo-depth", ""> {
   let summary = "Assign a buffer depth of the logical objectfifos.";

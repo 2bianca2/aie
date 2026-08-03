@@ -75,6 +75,10 @@ struct AMDAIESession
     // (NPU) device and everything else (transposes, casts) to the CPU device.
     // No-op unless both an amd-aie and an llvm-cpu device are declared.
     passManager.addPass(AMDAIE::createAMDAIEAssignDeviceAffinitiesPass());
+    // With affinity known per-dispatch, pad NPU contraction operands up to the
+    // target's pack-peel tile multiples so divisibility holds inside the
+    // dispatch. No-op for dispatches already divisible / not on amd-aie.
+    passManager.addPass(AMDAIE::createAMDAIEPadContractionDispatchesPass());
   }
 
   void populateHALTargetDevices(IREE::HAL::TargetDeviceList &targets) override {
