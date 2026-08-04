@@ -11,12 +11,30 @@
 #include "iree-amd-aie/Transforms/Transforms.h"
 #include "iree-amd-aie/Transforms/Utils/AMDAIEDmaUtils.h"
 #include "iree-amd-aie/Transforms/Utils/AMDAIEUtils.h"
+#include "mlir/Dialect/Utils/StaticValueUtils.h"
 #include "mlir/Transforms/DialectConversion.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 
 #define DEBUG_TYPE "iree-amdaie-controlcode-lowering"
 
 namespace mlir::iree_compiler::AMDAIE {
+
+// Returns the static base offset carried on the `memref.reinterpret_cast` that
+// AMDAIEConvertToDma inserts under a DMA `input` (kept out of the access pattern
+// so it must be recombined into the BD base address), or 0 if there is none.
+static int64_t getReinterpretBaseOffset(Value input) {
+  auto lof = dyn_cast_if_present<AMDAIE::LogicalObjectFifoFromMemrefOp>(
+      input.getDefiningOp());
+  if (!lof) return 0;
+  auto reinterpretOp = dyn_cast_if_present<memref::ReinterpretCastOp>(
+      lof.getMemref().getDefiningOp());
+  if (!reinterpretOp) return 0;
+  if (std::optional<int64_t> off =
+          getConstantIntValue(reinterpretOp.getConstifiedMixedOffset())) {
+    return *off;
+  }
+  return 0;
+}
 
 struct HalfDmaCpyNdToNpuConverter final
     : OpConversionPattern<AMDAIE::NpuHalfDmaCpyNdOp> {
@@ -54,6 +72,9 @@ struct HalfDmaCpyNdToNpuConverter final
     int64_t argIdx = 0;
     int64_t elemWidthInBits = 32;
     uint8_t memSpace = 0;
+    // Base offset carried on the AMDAIEConvertToDma reinterpret_cast (kept out of
+    // the access pattern); folded into the BD base address (`arg_plus`) below.
+    int64_t reinterpretElemOffset = 0;
     if (!loweringCtrlpktDma) {
       // Normal DMAs, update `argIdx`, `elemWidthInBits`, and `memSpace` based
       // on the memref.
@@ -65,11 +86,16 @@ struct HalfDmaCpyNdToNpuConverter final
                                    "`amdaie.logicalobjectfifo.from_memref`";
       }
       Value lofiMemref = logicalObjFifo.getMemref();
-      // Step through a `memref.reinterpret_cast` inserted by AMDAIEConvertToDma
-      // to rebase a non-zero base offset to 0; it preserves the def-use chain to
-      // the subspan (its source is the original subspan-backed memref).
+      // Step through a `memref.reinterpret_cast` inserted by AMDAIEConvertToDma;
+      // it preserves the def-use chain to the subspan (its source is the original
+      // subspan-backed memref) and carries the operand's static base offset,
+      // which is recombined into the BD base address below.
       if (auto reinterpretOp = dyn_cast_if_present<memref::ReinterpretCastOp>(
               lofiMemref.getDefiningOp())) {
+        if (std::optional<int64_t> off =
+                getConstantIntValue(reinterpretOp.getConstifiedMixedOffset())) {
+          reinterpretElemOffset = *off;
+        }
         lofiMemref = reinterpretOp.getSource();
       }
       auto assumeAlignmentOp =
@@ -193,7 +219,8 @@ struct HalfDmaCpyNdToNpuConverter final
     uint32_t bufferLengthInWords =
         bufferLength * elemWidthInBits / minStrideBitWidth;
     uint32_t innerBufferLength = bufferLengthInWords / repeatCount;
-    uint32_t bufferOffsetInBytes = bufferOffset * elemWidthInBits / 8;
+    uint32_t bufferOffsetInBytes =
+        (bufferOffset + reinterpretElemOffset) * elemWidthInBits / 8;
 
     // Offset set to zero for shim as the offset is embedded in the address
     // patch.
@@ -738,6 +765,9 @@ LogicalResult halfDmaToDmaStartBlocks(
   if (!maybeOffset) {
     return dmaOp->emitOpError() << "could not compute a static base offset";
   }
+  // Recombine the base offset carried on the AMDAIEConvertToDma reinterpret_cast
+  // (kept out of the access pattern), mirroring `insertWriteBdOps`.
+  *maybeOffset += getReinterpretBaseOffset(dmaOp.getInput());
   std::optional<uint8_t> maybeMemSpace = dmaOp.getMemorySpaceAsUInt();
   if (!maybeMemSpace) {
     return dmaOp->emitOpError() << "expected to have a memory space in input";

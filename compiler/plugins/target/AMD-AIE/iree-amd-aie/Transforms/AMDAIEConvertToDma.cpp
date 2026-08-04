@@ -192,44 +192,37 @@ static FailureOr<int64_t> recoverSubspanElementOffset(Value source) {
 }
 
 /// Handles a memref `source` whose non-zero base offset cannot be carried in the
-/// memref type (downstream `memref.global` shim buffers cannot have an offset).
-/// Recovers the static base offset, delinearizes it across the source `strides`
-/// into `perDim` contributions, and rebases the source to an offset-0 memref
-/// (returned via `rebasedOp`). The caller folds `perDim` into the DMA per-dim
-/// offsets so the offset lives in the DMA access pattern instead.
-static LogicalResult rebaseSourceToZeroOffset(IRRewriter &rewriter, Value source,
-                                              ArrayRef<int64_t> strides,
-                                              SmallVector<int64_t> &perDim,
-                                              Operation *&rebasedOp) {
+/// downstream shim `memref.global` type (those globals are built with the layout
+/// stripped, so they are always offset-0). Recovers the static base offset and
+/// reinterprets the SAME subspan-backed source (keeping the def-use chain to the
+/// `hal.interface.binding.subspan` so downstream passes can recover the binding
+/// ordinal) to a memref of the ORIGINAL shape that CARRIES the offset. The offset
+/// is deliberately kept OUT of the DMA access pattern: `AMDAIEControlCodeLowering`
+/// reads it back from this reinterpret and folds it into the BD base address
+/// (`arg_plus`). Keeping the access pattern identical to the offset-0 case is what
+/// lets `foldLinearDims`/`AMDAIEDmaLoopSubsumption` keep the pattern within the
+/// shim BD's 4-dimension limit at large K (folding the offset into the per-dim
+/// access offsets instead blocks that fold and overflows the BD at large K).
+static LogicalResult reinterpretSourceWithBaseOffset(IRRewriter &rewriter,
+                                                     Value source,
+                                                     ArrayRef<int64_t> strides,
+                                                     Operation *&rebasedOp) {
   if (llvm::any_of(strides,
                    [](int64_t s) { return ShapedType::isDynamic(s); })) {
     return failure();
   }
   FailureOr<int64_t> maybeOffset = recoverSubspanElementOffset(source);
   if (failed(maybeOffset)) return failure();
-  int64_t remaining = *maybeOffset;
-  perDim.assign(strides.size(), 0);
-  for (unsigned i = 0; i < strides.size(); ++i) {
-    if (strides[i] == 0) continue;
-    perDim[i] = remaining / strides[i];
-    remaining = remaining % strides[i];
-  }
   MLIRContext *ctx = source.getContext();
   Location loc = source.getLoc();
   ArrayRef<int64_t> srcShape = cast<MemRefType>(source.getType()).getShape();
-  SmallVector<int64_t> rebaseShape(srcShape.size());
-  for (unsigned i = 0; i < srcShape.size(); ++i)
-    rebaseShape[i] = perDim[i] + srcShape[i];
-  // Rebase to offset 0 by reinterpreting the SAME subspan-backed source (not its
-  // extracted base buffer): this keeps the def-use chain to the
-  // `hal.interface.binding.subspan` intact so downstream passes can still
-  // recover the binding ordinal. reinterpret_cast uses the source's aligned
-  // (allocation) base pointer, so offset 0 points at the buffer base; the
-  // delinearized offset is carried by the DMA per-dim offsets instead.
+  // reinterpret_cast uses the source's aligned (allocation) base pointer, so the
+  // recovered element offset points at the operand's data; the original shape is
+  // the correct in-bounds view.
   auto rebased = rewriter.create<memref::ReinterpretCastOp>(
       loc, source,
-      /*offset=*/getAsIndexOpFoldResult(ctx, int64_t(0)),
-      getAsIndexOpFoldResult(ctx, rebaseShape),
+      /*offset=*/getAsIndexOpFoldResult(ctx, *maybeOffset),
+      getAsIndexOpFoldResult(ctx, SmallVector<int64_t>(srcShape)),
       getAsIndexOpFoldResult(ctx, SmallVector<int64_t>(strides)));
   rebasedOp = rebased.getOperation();
   return success();
@@ -257,20 +250,22 @@ LogicalResult setDmaInputs(IRRewriter &rewriter, Operation *&operandOp,
     sizes = getAsIndexOpFoldResult(ctx, sizesI64);
     if (baseOffset != 0) {
       // The whole buffer is DMA'd from a non-zero base offset (e.g. a buffer
-      // packed in a shared pool). Rebase to offset 0 and move the base offset
-      // into the DMA per-dim offsets.
+      // packed in a shared pool). Carry the offset on a reinterpret_cast (folded
+      // into the BD base address at control-code lowering) and keep the access
+      // pattern offset-0 so it stays within the shim BD dimension limit.
       Value source = operandOp->getResult(0);
-      SmallVector<int64_t> perDim;
       Operation *rebasedOp = nullptr;
-      if (failed(rebaseSourceToZeroOffset(rewriter, source, stridesI64, perDim,
-                                          rebasedOp))) {
+      if (failed(reinterpretSourceWithBaseOffset(rewriter, source, stridesI64,
+                                                 rebasedOp))) {
         return operandOp->emitOpError(llvm::formatv(
             "has a non-zero base offset {0} that could not be recovered from a "
             "backing subspan; not supported by this pass.",
             baseOffset));
       }
       operandOp = rebasedOp;
-      for (int64_t p : perDim) offsets.push_back(getAsIndexOpFoldResult(ctx, p));
+      for (int i = 0; i < sizes.size(); i++) {
+        offsets.push_back(getAsIndexOpFoldResult(ctx, 0));
+      }
       return success();
     }
     // Alloc Op has no offsets.
@@ -297,39 +292,21 @@ LogicalResult setDmaInputs(IRRewriter &rewriter, Operation *&operandOp,
     sizes = subviewOp.getMixedSizes();
 
     // A non-zero/dynamic base offset on the subview source (e.g. a buffer packed
-    // at a non-zero offset in a shared constant pool) cannot be carried in the
-    // memref type -- downstream `memref.global` shim buffers cannot have an
-    // offset. Rebase the source to an offset-0 memref and fold the base offset
-    // into the per-dimension DMA offsets, so the offset lives in the DMA access
-    // pattern instead. Only a statically-recoverable offset is handled.
+    // at a non-zero offset in a shared pool) cannot be carried in the downstream
+    // shim `memref.global` type. Carry it on a reinterpret_cast (recombined into
+    // the BD base address at control-code lowering) and leave the subview's own
+    // offsets -- the offset-0 tiling access pattern -- untouched, so the pattern
+    // stays within the shim BD dimension limit. Only a statically-recoverable
+    // offset is handled.
     if (baseOffset != 0) {
-      SmallVector<int64_t> perDim;
       Operation *rebasedOp = nullptr;
-      if (failed(rebaseSourceToZeroOffset(rewriter, subviewOp.getSource(),
-                                          stridesI64, perDim, rebasedOp))) {
+      if (failed(reinterpretSourceWithBaseOffset(
+              rewriter, subviewOp.getSource(), stridesI64, rebasedOp))) {
         return subviewOp->emitOpError(
             "has a non-zero base offset that could not be recovered from a "
             "backing subspan; not supported by this pass.");
       }
       operandOp = rebasedOp;
-      // Fold the delinearized base offset into the subview offsets. A static
-      // subview offset folds into a constant; a dynamic one (e.g. a tiling
-      // induction variable) gets an arith.addi of the static contribution.
-      Location loc = subviewOp.getLoc();
-      for (unsigned i = 0; i < offsets.size() && i < perDim.size(); ++i) {
-        if (perDim[i] == 0) continue;
-        std::optional<int64_t> cur = getConstantIntValue(offsets[i]);
-        if (cur) {
-          offsets[i] = getAsIndexOpFoldResult(ctx, *cur + perDim[i]);
-        } else {
-          Value dynOffset = cast<Value>(offsets[i]);
-          Value contribution =
-              rewriter.create<arith::ConstantIndexOp>(loc, perDim[i]);
-          offsets[i] =
-              rewriter.create<arith::AddIOp>(loc, dynOffset, contribution)
-                  .getResult();
-        }
-      }
     }
     if (llvm::any_of(sizes, [](OpFoldResult fr) {
           return !getConstantIntValue(fr).has_value();

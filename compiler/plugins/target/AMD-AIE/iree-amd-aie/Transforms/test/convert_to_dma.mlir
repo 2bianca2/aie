@@ -368,18 +368,20 @@ func.func @permute_unpack_tricyle_permute(){
 // A subview whose source memref carries a non-zero base offset -- here a buffer
 // packed at a byte offset in a shared pool, so the offset is dynamic in the
 // memref type but a constant `offset(%c2048)` on the backing subspan -- is
-// rebased to offset 0 with a `memref.reinterpret_cast` on the same
-// subspan-backed source (preserving the def-use chain to the subspan), and the
-// delinearized base offset (2048 bytes / 4 = 512 elems = 8 * stride 64) is
-// folded into the DMA access pattern with an `arith.addi` on the dynamic
-// subview offset.
+// reinterpret_cast on the same subspan-backed source (preserving the def-use
+// chain to the subspan) to a memref of the ORIGINAL shape that CARRIES the base
+// offset (2048 bytes / 4 = 512 elems). The offset is kept OUT of the DMA access
+// pattern (no `arith.addi`); the subview's own offsets flow through unchanged, so
+// the access pattern is identical to the offset-0 case (which keeps it within the
+// shim BD dimension limit at large K). AMDAIEControlCodeLowering later folds the
+// reinterpret offset into the BD base address.
 
 // CHECK-LABEL: @nonzero_base_offset_pack
-// CHECK: %[[REINT:.*]] = memref.reinterpret_cast %{{.*}} to offset: [0], sizes: [40, 8, 8], strides: [64, 8, 1]
+// CHECK: %[[REINT:.*]] = memref.reinterpret_cast %{{.*}} to offset: [512], sizes: [32, 8, 8], strides: [64, 8, 1]
 // CHECK: %[[FROMREINT:.*]] = amdaie.logicalobjectfifo.from_memref %[[REINT]]
-// CHECK: %[[OFF:.*]] = arith.addi %arg0, %c8{{.*}}
+// CHECK-NOT: arith.addi
 // CHECK: amdaie.dma_cpy_nd
-// CHECK-SAME: %[[FROMREINT]][%[[OFF]], 0, 0, %{{.*}}, 0]
+// CHECK-SAME: %[[FROMREINT]][%arg0, 0, 0, %{{.*}}, 0]
 #pipeline_layout = #hal.pipeline.layout<bindings = [#hal.pipeline.binding<storage_buffer, "ReadOnly|Indirect">]>
 func.func @nonzero_base_offset_pack() {
   %c0 = arith.constant 0 : index
