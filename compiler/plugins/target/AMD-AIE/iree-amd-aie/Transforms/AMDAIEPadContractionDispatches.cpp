@@ -18,14 +18,14 @@
 //   * rewrites the executable so its bindings/loads/matmul see the padded shape.
 //
 // K is a reduction dim: the padded elements are zero, so the extra products are
-// zero and the output is unchanged (no cropping). M is the outer output dim: the
-// matmul output, the output binding and the store grow too, and the padded
-// dispatch result is cropped back to the logical shape by a `flow.tensor.slice`
-// *outside* the dispatch. Because M is the outermost dim the crop is a
-// contiguous outer-dim slice that the stream layer lowers correctly, and the
-// padded buffer stays a plain dispatch result. N (the inner output dim) is not
-// padded here -- a partial N would need a strided inner-dim crop -- so a dispatch
-// whose N is non-divisible is left untouched (VGG's N is always a tile multiple).
+// zero and the output is unchanged (no cropping). The output dims M (outer) and
+// N (inner) are handled uniformly: when either is padded the matmul output, the
+// output binding and the store grow too, and the padded dispatch result is
+// cropped back to the logical shape by a `tensor.extract_slice` *dispatch*
+// placed on the host (CPU). Using a dispatch (rather than `flow.tensor.slice`,
+// which only crops a contiguous outer-dim range) lets the inner N dim be cropped
+// with a strided extraction, so a dispatch whose N is non-divisible (e.g. a
+// 1000-class classifier matmul) is padded and cropped like M.
 //
 // The padding multiples are read from each dispatch's own device affinity
 // (affinity -> device global -> executable target attr), never hardcoded, so the
@@ -316,26 +316,73 @@ static Value createPaddingDispatch(IRRewriter &rewriter, ModuleOp module,
   return dispatchOp.getResult(0);
 }
 
-/// Crops `v` down to `dstShape` (low corner) with a `flow.tensor.slice`. Only
-/// valid for a contiguous outer-dim crop (only the outermost dim shrinks), which
-/// the stream layer lowers to a plain offset+length copy; the caller guarantees
-/// this. Returns `v` unchanged if already the right shape.
-static Value createCropSlice(IRRewriter &rewriter, Value v,
-                             ArrayRef<int64_t> dstShape) {
+/// Creates a `flow.executable` + `flow.dispatch` that crops `v` down to
+/// `dstShape` (low corner via `tensor.extract_slice`), placed on `hostAffinity`.
+/// Returns the cropped value, or `v` unchanged if `dstShape` already matches.
+/// This mirrors `createPaddingDispatch`: a dispatch (unlike `flow.tensor.slice`,
+/// which only copies contiguous outer-dim sub-ranges) performs the strided
+/// extraction required to crop an inner dimension, so both M (outer) and N
+/// (inner) output dims are handled uniformly. `counter` uniquifies the symbol
+/// names.
+static Value createCropDispatch(IRRewriter &rewriter, ModuleOp module, Value v,
+                                ArrayRef<int64_t> dstShape,
+                                IREE::HAL::DeviceAffinityAttr hostAffinity,
+                                int &counter) {
   Location loc = v.getLoc();
   auto srcType = cast<RankedTensorType>(v.getType());
   if (dstShape == srcType.getShape()) return v;
   auto dstType = RankedTensorType::get(dstShape, srcType.getElementType());
-  SmallVector<Value> starts, lengths;
-  for (int64_t s : dstShape) {
-    starts.push_back(rewriter.create<arith::ConstantIndexOp>(loc, 0));
-    lengths.push_back(rewriter.create<arith::ConstantIndexOp>(loc, s));
-  }
-  return rewriter
-      .create<IREE::Flow::TensorSliceOp>(loc, dstType, v,
-                                         /*source_dims=*/ValueRange{}, starts,
-                                         lengths, /*result_dims=*/ValueRange{})
-      .getResult();
+  auto inBinding = IREE::TensorExt::DispatchTensorType::get(
+      IREE::TensorExt::TensorAccess::ReadOnly, srcType);
+  auto outBinding = IREE::TensorExt::DispatchTensorType::get(
+      IREE::TensorExt::TensorAccess::WriteOnly, dstType);
+  std::string idx = std::to_string(counter++);
+
+  // Worker func: load the full padded input, extract the low-corner slice,
+  // store.
+  auto funcOp = func::FuncOp::create(
+      loc, "crop_dispatch_" + idx,
+      rewriter.getFunctionType({inBinding, outBinding}, {}));
+  funcOp.setPublic();
+  Block *entry = funcOp.addEntryBlock();
+  OpBuilder fb = OpBuilder::atBlockBegin(entry);
+  Value loaded = fb.create<IREE::TensorExt::DispatchTensorLoadOp>(
+      loc, srcType, entry->getArgument(0), /*sourceDynamicDims=*/ValueRange{});
+  SmallVector<OpFoldResult> offsets(dstShape.size(), rewriter.getIndexAttr(0));
+  SmallVector<OpFoldResult> sizes;
+  SmallVector<OpFoldResult> strides(dstShape.size(), rewriter.getIndexAttr(1));
+  for (int64_t s : dstShape) sizes.push_back(rewriter.getIndexAttr(s));
+  Value cropped = fb.create<tensor::ExtractSliceOp>(loc, dstType, loaded,
+                                                    offsets, sizes, strides);
+  fb.create<IREE::TensorExt::DispatchTensorStoreOp>(
+      loc, cropped, entry->getArgument(1), /*targetDynamicDims=*/ValueRange{});
+  fb.create<func::ReturnOp>(loc);
+
+  // Executable wrapping the func, with a default workgroup-count region.
+  OpBuilder mb(&module.getBody()->back());
+  auto exeOp =
+      IREE::Flow::ExecutableOp::create(mb, loc, "crop_executable_" + idx);
+  exeOp.setPrivate();
+  OpBuilder exeBuilder = OpBuilder::atBlockBegin(&exeOp.getBlock());
+  auto innerModule = mlir::ModuleOp::create(exeBuilder, loc);
+  innerModule.push_back(funcOp);
+  OpBuilder exportBuilder(exeOp.getBody());
+  auto exportOp = IREE::Flow::ExecutableExportOp::create(
+      exportBuilder, loc, funcOp.getName(), SymbolRefAttr::get(funcOp));
+  Block *wcBlock = &exportOp.getWorkgroupCount().emplaceBlock();
+  OpBuilder wb = OpBuilder::atBlockBegin(wcBlock);
+  Type indexTy = wb.getIndexType();
+  auto countOp = wb.create<IREE::TensorExt::DispatchWorkgroupCountFromSliceOp>(
+      loc, TypeRange{indexTy, indexTy, indexTy}, /*ordinal_operands=*/ValueRange{});
+  wb.create<IREE::Flow::ReturnOp>(loc, countOp.getResults());
+
+  // Host dispatch, pinned to the host device.
+  auto dispatchOp = IREE::Flow::DispatchOp::create(
+      rewriter, loc, exportOp, /*workload=*/ValueRange{}, TypeRange{dstType},
+      /*result_dims=*/ValueRange{}, /*arguments=*/ValueRange{v},
+      /*argument_dims=*/ValueRange{}, /*tied_operands=*/ArrayAttr{});
+  dispatchOp->setAttr("stream.affinity", hostAffinity);
+  return dispatchOp.getResult(0);
 }
 
 class AMDAIEPadContractionDispatchesPass
@@ -394,20 +441,20 @@ void AMDAIEPadContractionDispatchesPass::runOnOperation() {
     int64_t nPad = roundUpToMultiple(n, mult->n);
     int64_t kPad = roundUpToMultiple(k, mult->k);
     if (mPad == m && nPad == n && kPad == k) continue;  // already divisible
-    // Inner output dim (N) padding needs a strided crop we can't express here;
-    // leave such dispatches untouched (VGG's N is always a tile multiple).
-    if (nPad != n) continue;
-    bool padM = mPad != m;
+    // Any output dim (M outer and/or N inner) may be padded; the grown result is
+    // cropped back on the host by a single extract_slice dispatch.
+    bool padOut = mPad != m || nPad != n;
 
     // Rewrite the executable once per shared executable: grow the LHS [M,K] /
-    // RHS [K,N] bindings; for M padding grow the output init, matmul result and
-    // store binding too (the dispatch stays fully divisible, cropped on host).
+    // RHS [K,N] bindings; when an output dim is padded grow the output init,
+    // matmul result and store binding too (the dispatch stays fully divisible,
+    // cropped on host).
     if (paddedExecutables.insert(func.getOperation()).second) {
       growBinding(rewriter, info->lhsArg, info->lhsLoad, {mPad, kPad});
-      growBinding(rewriter, info->rhsArg, info->rhsLoad, {kPad, n});
-      if (padM) {
-        growMatmulInit(rewriter, *info, mPad, n);
-        growOutputStore(rewriter, *info, mPad, n);
+      growBinding(rewriter, info->rhsArg, info->rhsLoad, {kPad, nPad});
+      if (padOut) {
+        growMatmulInit(rewriter, *info, mPad, nPad);
+        growOutputStore(rewriter, *info, mPad, nPad);
       }
       SmallVector<Type> argTypes(llvm::map_range(
           func.getArguments(), [](BlockArgument a) { return a.getType(); }));
@@ -421,17 +468,19 @@ void AMDAIEPadContractionDispatchesPass::runOnOperation() {
                               {mPad, kPad}, hostAffinity, counter);
     Value rhsPadded =
         createPaddingDispatch(rewriter, module, dispatch.getArguments()[rhsArgNo],
-                              {kPad, n}, hostAffinity, counter);
+                              {kPad, nPad}, hostAffinity, counter);
     dispatch.getArgumentsMutable().slice(lhsArgNo, 1).assign(lhsPadded);
     dispatch.getArgumentsMutable().slice(rhsArgNo, 1).assign(rhsPadded);
 
-    // Grow this caller's result to [mPad, n] and crop it back to [m, n] on the
-    // host (contiguous outer-dim slice).
-    if (padM) {
+    // Grow this caller's result to [mPad, nPad] and crop it back to [m, n] on
+    // the host with an extract_slice dispatch (handles the inner N dim too).
+    if (padOut) {
       Value result = dispatch.getResult(0);
-      result.setType(RankedTensorType::get({mPad, n}, outElemType));
+      result.setType(RankedTensorType::get({mPad, nPad}, outElemType));
       rewriter.setInsertionPointAfter(dispatch);
-      Value cropped = createCropSlice(rewriter, result, {m, n});
+      Value cropped =
+          createCropDispatch(rewriter, module, result, {m, n}, hostAffinity,
+                             counter);
       result.replaceAllUsesExcept(cropped, cropped.getDefiningOp());
     }
   }
