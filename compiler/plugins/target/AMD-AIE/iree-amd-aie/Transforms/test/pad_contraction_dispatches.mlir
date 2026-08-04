@@ -58,6 +58,63 @@ module attributes {stream.affinity.default = #hal.device.affinity<@npu>} {
 
 // -----
 
+// A plain matmul whose output row dim M=196 is not a multiple of the M tile
+// (num_rows*instrM = 4*8 = 32) is padded to M=224. Unlike K, M is the outer
+// output dim: the LHS grows on M, the output init (empty/fill), matmul result
+// and output binding grow to [224,128], and the padded dispatch result is
+// cropped back to [196,128] by a flow.tensor.slice outside the dispatch
+// (contiguous outer-dim slice). N=128 and K=64 are already divisible, so only
+// the LHS gets a padding dispatch.
+
+// CHECK-LABEL: func.func @matmul_m
+// CHECK-SAME:    %arg0: !iree_tensor_ext.dispatch.tensor<readonly:tensor<224x64xbf16>>
+// CHECK-SAME:    %arg1: !iree_tensor_ext.dispatch.tensor<readonly:tensor<64x128xbf16>>
+// CHECK-SAME:    %arg2: !iree_tensor_ext.dispatch.tensor<writeonly:tensor<224x128xf32>>
+// CHECK:         %[[MM:.+]] = linalg.matmul ins(%{{.+}}, %{{.+}} : tensor<224x64xbf16>, tensor<64x128xbf16>) outs(%{{.+}} : tensor<224x128xf32>)
+// CHECK:         iree_tensor_ext.dispatch.tensor.store %[[MM]], %arg2, offsets = [0, 0], sizes = [224, 128]
+
+// Only the LHS is zero-padded (M 196 -> 224); the RHS is untouched.
+// CHECK:       flow.executable private @pad_executable_0
+// CHECK:         tensor.pad %{{.+}} low[0, 0] high[28, 0]
+// CHECK-NOT:   flow.executable private @pad_executable_1
+
+// CHECK-LABEL: util.func public @main_m
+// CHECK:         %[[LPAD:.+]] = flow.dispatch @pad_executable_0::@pad_dispatch_0(%arg0)
+// CHECK-SAME:      {stream.affinity = #hal.device.affinity<@cpu>}
+// CHECK-SAME:      : (tensor<196x64xbf16>) -> tensor<224x64xbf16>
+// CHECK:         %[[MMR:.+]] = flow.dispatch @dispatch_m::@matmul_m(%[[LPAD]], %arg1)
+// CHECK-SAME:      {stream.affinity = #hal.device.affinity<@npu>}
+// CHECK-SAME:      : (tensor<224x64xbf16>, tensor<64x128xbf16>) -> tensor<224x128xf32>
+// CHECK:         flow.tensor.slice %[[MMR]][%c0, %c0{{.*}} for %c196, %c128] : tensor<224x128xf32> -> tensor<196x128xf32>
+module attributes {stream.affinity.default = #hal.device.affinity<@npu>} {
+  util.global private @npu = #hal.device.target<"amdxdna", [#hal.executable.target<"amd-aie", "amdaie-pdi-fb", {num_cols = 8 : i32, num_rows = 4 : i32, target_device = "npu4", ukernels = "none"}>]> : !hal.device
+  util.global private @cpu = #hal.device.target<"local", [#hal.executable.target<"llvm-cpu", "embedded-elf-x86_64", {}>]> : !hal.device
+  flow.executable private @dispatch_m {
+    flow.executable.export public @matmul_m workgroups() -> (index, index, index) {
+      %x, %y, %z = iree_tensor_ext.dispatch.workgroup_count_from_slice()
+      flow.return %x, %y, %z : index, index, index
+    }
+    builtin.module {
+      func.func @matmul_m(%arg0: !iree_tensor_ext.dispatch.tensor<readonly:tensor<196x64xbf16>>, %arg1: !iree_tensor_ext.dispatch.tensor<readonly:tensor<64x128xbf16>>, %arg2: !iree_tensor_ext.dispatch.tensor<writeonly:tensor<196x128xf32>>) {
+        %cst = arith.constant 0.000000e+00 : f32
+        %0 = iree_tensor_ext.dispatch.tensor.load %arg0, offsets = [0, 0], sizes = [196, 64], strides = [1, 1] : !iree_tensor_ext.dispatch.tensor<readonly:tensor<196x64xbf16>> -> tensor<196x64xbf16>
+        %1 = iree_tensor_ext.dispatch.tensor.load %arg1, offsets = [0, 0], sizes = [64, 128], strides = [1, 1] : !iree_tensor_ext.dispatch.tensor<readonly:tensor<64x128xbf16>> -> tensor<64x128xbf16>
+        %2 = tensor.empty() : tensor<196x128xf32>
+        %3 = linalg.fill ins(%cst : f32) outs(%2 : tensor<196x128xf32>) -> tensor<196x128xf32>
+        %4 = linalg.matmul ins(%0, %1 : tensor<196x64xbf16>, tensor<64x128xbf16>) outs(%3 : tensor<196x128xf32>) -> tensor<196x128xf32>
+        iree_tensor_ext.dispatch.tensor.store %4, %arg2, offsets = [0, 0], sizes = [196, 128], strides = [1, 1] : tensor<196x128xf32> -> !iree_tensor_ext.dispatch.tensor<writeonly:tensor<196x128xf32>>
+        return
+      }
+    }
+  }
+  util.func public @main_m(%arg0: tensor<196x64xbf16>, %arg1: tensor<64x128xbf16>) -> tensor<196x128xf32> {
+    %0 = flow.dispatch @dispatch_m::@matmul_m(%arg0, %arg1) {stream.affinity = #hal.device.affinity<@npu>} : (tensor<196x64xbf16>, tensor<64x128xbf16>) -> tensor<196x128xf32>
+    util.return %0 : tensor<196x128xf32>
+  }
+}
+
+// -----
+
 // A matmul whose K=64 is already a multiple of 32 is left untouched (no padding
 // dispatch, no shape change) -- the pass is a no-op for divisible dispatches.
 

@@ -8,16 +8,24 @@
 // tile multiples, at the Flow dispatch boundary.
 //
 // Runs right after `AMDAIEAssignDeviceAffinities`, when every `flow.dispatch`
-// already carries a `stream.affinity` and dispatch regions are outlined. For a
-// contraction dispatch pinned to an amd-aie device whose reduction (K) dim is
-// not a multiple of the target's L2 reduction tile, this pass:
-//   * grows the matmul operands to the padded shape *outside* the dispatch
-//     (`flow.tensor.splat` zero + `flow.tensor.update` of the valid data), and
+// already carries a `stream.affinity` and dispatch regions are outlined. This
+// pass assumes the amd-aie contraction dispatch is a *plain* matmul
+// (`empty -> fill(0) -> matmul -> store`, with bias/relu/etc. already split into
+// separate dispatches upstream). For such a dispatch pinned to an amd-aie device
+// whose M/K dims are not multiples of the target tiles, it:
+//   * zero-pads the matmul operands to the padded shape *outside* the dispatch
+//     (a host `tensor.pad` dispatch), and
 //   * rewrites the executable so its bindings/loads/matmul see the padded shape.
-// The padded reduction elements are zero, so the extra products are zero and the
-// result is unchanged -- no cropping is needed for a reduction dim. Because the
-// dispatch shape entering codegen is now divisible, the validated pack-peel path
-// works without any partial-tile handling in the DMA lowering.
+//
+// K is a reduction dim: the padded elements are zero, so the extra products are
+// zero and the output is unchanged (no cropping). M is the outer output dim: the
+// matmul output, the output binding and the store grow too, and the padded
+// dispatch result is cropped back to the logical shape by a `flow.tensor.slice`
+// *outside* the dispatch. Because M is the outermost dim the crop is a
+// contiguous outer-dim slice that the stream layer lowers correctly, and the
+// padded buffer stays a plain dispatch result. N (the inner output dim) is not
+// padded here -- a partial N would need a strided inner-dim crop -- so a dispatch
+// whose N is non-divisible is left untouched (VGG's N is always a tile multiple).
 //
 // The padding multiples are read from each dispatch's own device affinity
 // (affinity -> device global -> executable target attr), never hardcoded, so the
@@ -99,12 +107,18 @@ static std::optional<PaddingMultiples> getPaddingMultiples(
                           /*k=*/getPackPeelReductionTile(/*kPackScaleL1=*/1)};
 }
 
-/// Where the reduction (K) dim of a matmul lives, per operand.
-struct MatmulKInfo {
+/// A plain matmul (`empty -> fill -> matmul -> store`) inside a dispatch
+/// executable, with the ops/bindings needed to grow its M/K dims. Sizes are
+/// intentionally not cached here -- they are read from each caller dispatch's
+/// operands so a shared executable can be handled per caller.
+struct MatmulInfo {
   linalg::MatmulOp matmul;
   IREE::TensorExt::DispatchTensorLoadOp lhsLoad, rhsLoad;
   BlockArgument lhsArg, rhsArg;  // executable bindings feeding LHS/RHS
-  int64_t k;                     // current reduction size
+  linalg::FillOp fill;           // output init: matmul outs = fill(empty)
+  tensor::EmptyOp empty;
+  IREE::TensorExt::DispatchTensorStoreOp store;  // writes the output binding
+  BlockArgument outArg;                          // the output binding
 };
 
 /// Returns the func of a dispatch's single entry point, or null.
@@ -135,8 +149,10 @@ static IREE::TensorExt::DispatchTensorLoadOp getFullTensorLoad(Value operand) {
   return load;
 }
 
-/// Inspects the func for a single paddeable matmul. K is LHS dim 1 / RHS dim 0.
-static std::optional<MatmulKInfo> getMatmulKInfo(func::FuncOp func) {
+/// Inspects the func for a single plain matmul: LHS/RHS from full-tensor loads
+/// of bindings, an `empty`+`fill` output init, and the matmul result stored
+/// directly to the output binding.
+static std::optional<MatmulInfo> getMatmulInfo(func::FuncOp func) {
   SmallVector<linalg::MatmulOp> matmuls;
   func.walk([&](linalg::MatmulOp op) { matmuls.push_back(op); });
   if (matmuls.size() != 1) return std::nullopt;
@@ -147,28 +163,73 @@ static std::optional<MatmulKInfo> getMatmulKInfo(func::FuncOp func) {
   auto lhsArg = dyn_cast<BlockArgument>(lhsLoad.getSource());
   auto rhsArg = dyn_cast<BlockArgument>(rhsLoad.getSource());
   if (!lhsArg || !rhsArg) return std::nullopt;
-  int64_t k =
-      cast<RankedTensorType>(lhsLoad.getType()).getShape()[1];
-  return MatmulKInfo{matmul, lhsLoad, rhsLoad, lhsArg, rhsArg, k};
+  auto fill = matmul.getDpsInits()[0].getDefiningOp<linalg::FillOp>();
+  if (!fill) return std::nullopt;
+  auto empty = fill.getDpsInits()[0].getDefiningOp<tensor::EmptyOp>();
+  if (!empty) return std::nullopt;
+  SmallVector<IREE::TensorExt::DispatchTensorStoreOp> stores;
+  func.walk(
+      [&](IREE::TensorExt::DispatchTensorStoreOp s) { stores.push_back(s); });
+  if (stores.size() != 1) return std::nullopt;
+  auto store = stores.front();
+  // Plain matmul: the matmul result feeds the store directly (no output chain).
+  if (store.getValue() != matmul.getResult(0)) return std::nullopt;
+  auto outArg = dyn_cast<BlockArgument>(store.getTarget());
+  if (!outArg) return std::nullopt;
+  return MatmulInfo{matmul, lhsLoad, rhsLoad, lhsArg,
+                    rhsArg, fill,    empty,   store,  outArg};
 }
 
-/// Grows executable binding `arg` and its full-tensor `load` at `dim` to
-/// `newSize` (the matmul revalidates from the loaded operand types).
-static void padBinding(IRRewriter &rewriter, BlockArgument arg,
-                       IREE::TensorExt::DispatchTensorLoadOp load, int64_t dim,
-                       int64_t newSize) {
+/// Grows executable binding `arg` and its full-tensor `load` to `newShape`
+/// (the matmul revalidates from the loaded operand types).
+static void growBinding(IRRewriter &rewriter, BlockArgument arg,
+                        IREE::TensorExt::DispatchTensorLoadOp load,
+                        ArrayRef<int64_t> newShape) {
   auto dtt = cast<IREE::TensorExt::DispatchTensorType>(arg.getType());
   auto tensorType = dtt.asRankedTensorType();
-  SmallVector<int64_t> shape(tensorType.getShape());
-  shape[dim] = newSize;
   auto newTensorType =
-      RankedTensorType::get(shape, tensorType.getElementType());
+      RankedTensorType::get(newShape, tensorType.getElementType());
   arg.setType(IREE::TensorExt::DispatchTensorType::get(dtt.getAccess(),
                                                        newTensorType));
   rewriter.setInsertionPoint(load);
   auto newLoad = rewriter.create<IREE::TensorExt::DispatchTensorLoadOp>(
       load.getLoc(), newTensorType, arg, /*sourceDynamicDims=*/ValueRange{});
   rewriter.replaceOp(load, newLoad.getResult());
+}
+
+/// Grows the output init (`empty`+`fill`) and the matmul result to [mPad, nPad].
+static void growMatmulInit(IRRewriter &rewriter, MatmulInfo &info, int64_t mPad,
+                           int64_t nPad) {
+  Location loc = info.fill.getLoc();
+  Type elemType =
+      cast<RankedTensorType>(info.matmul.getResult(0).getType()).getElementType();
+  rewriter.setInsertionPoint(info.empty);
+  Value newEmpty = rewriter.create<tensor::EmptyOp>(
+      loc, ArrayRef<int64_t>{mPad, nPad}, elemType);
+  rewriter.setInsertionPoint(info.fill);
+  Value cst = info.fill.getInputs()[0];
+  auto newFill =
+      rewriter.create<linalg::FillOp>(loc, ValueRange{cst}, ValueRange{newEmpty});
+  info.matmul.setDpsInitOperand(0, newFill.getResult(0));
+  info.matmul.getResult(0).setType(RankedTensorType::get({mPad, nPad}, elemType));
+  rewriter.eraseOp(info.fill);
+  rewriter.eraseOp(info.empty);
+}
+
+/// Grows the output binding and rewrites the store to write the full padded
+/// [mPad, nPad] matmul result.
+static void growOutputStore(IRRewriter &rewriter, MatmulInfo &info,
+                            int64_t mPad, int64_t nPad) {
+  auto dtt = cast<IREE::TensorExt::DispatchTensorType>(info.outArg.getType());
+  auto newTensorType = RankedTensorType::get(
+      {mPad, nPad}, dtt.asRankedTensorType().getElementType());
+  info.outArg.setType(IREE::TensorExt::DispatchTensorType::get(dtt.getAccess(),
+                                                               newTensorType));
+  rewriter.setInsertionPoint(info.store);
+  rewriter.create<IREE::TensorExt::DispatchTensorStoreOp>(
+      info.store.getLoc(), info.matmul.getResult(0), info.outArg,
+      /*targetDynamicDims=*/ValueRange{});
+  rewriter.eraseOp(info.store);
 }
 
 /// Returns a device affinity pinned to a host (non-amd-aie) device global, or
@@ -191,19 +252,19 @@ static IREE::HAL::DeviceAffinityAttr getHostAffinity(ModuleOp module) {
   return {};
 }
 
-/// Creates a `flow.executable` + `flow.dispatch` that zero-pads `v` at `dim` up
-/// to `newSize` (empty + fill 0 + insert_slice), placed on `hostAffinity`.
-/// Returns the padded value. A dispatch (unlike `flow.tensor.update`, which only
-/// copies contiguous outer-dim sub-ranges) performs the strided placement
-/// required to pad an inner dimension. `counter` uniquifies the symbol names.
+/// Creates a `flow.executable` + `flow.dispatch` that zero-pads `v` up to
+/// `dstShape` (high padding via `tensor.pad`), placed on `hostAffinity`. Returns
+/// the padded value, or `v` unchanged if `dstShape` already matches. A dispatch
+/// (unlike `flow.tensor.update`, which only copies contiguous outer-dim
+/// sub-ranges) performs the strided placement required to pad an inner
+/// dimension. `counter` uniquifies the symbol names.
 static Value createPaddingDispatch(IRRewriter &rewriter, ModuleOp module,
-                                   Value v, int64_t dim, int64_t newSize,
+                                   Value v, ArrayRef<int64_t> dstShape,
                                    IREE::HAL::DeviceAffinityAttr hostAffinity,
                                    int &counter) {
   Location loc = v.getLoc();
   auto srcType = cast<RankedTensorType>(v.getType());
-  SmallVector<int64_t> dstShape(srcType.getShape());
-  dstShape[dim] = newSize;
+  if (dstShape == srcType.getShape()) return v;
   auto dstType = RankedTensorType::get(dstShape, srcType.getElementType());
   auto inBinding = IREE::TensorExt::DispatchTensorType::get(
       IREE::TensorExt::TensorAccess::ReadOnly, srcType);
@@ -211,8 +272,7 @@ static Value createPaddingDispatch(IRRewriter &rewriter, ModuleOp module,
       IREE::TensorExt::TensorAccess::WriteOnly, dstType);
   std::string idx = std::to_string(counter++);
 
-  // Worker func: load full input, fill a padded tensor with 0, insert the valid
-  // data, store.
+  // Worker func: load the full input, high-pad it with zeros, store.
   auto funcOp = func::FuncOp::create(
       loc, "pad_dispatch_" + idx,
       rewriter.getFunctionType({inBinding, outBinding}, {}));
@@ -256,6 +316,28 @@ static Value createPaddingDispatch(IRRewriter &rewriter, ModuleOp module,
   return dispatchOp.getResult(0);
 }
 
+/// Crops `v` down to `dstShape` (low corner) with a `flow.tensor.slice`. Only
+/// valid for a contiguous outer-dim crop (only the outermost dim shrinks), which
+/// the stream layer lowers to a plain offset+length copy; the caller guarantees
+/// this. Returns `v` unchanged if already the right shape.
+static Value createCropSlice(IRRewriter &rewriter, Value v,
+                             ArrayRef<int64_t> dstShape) {
+  Location loc = v.getLoc();
+  auto srcType = cast<RankedTensorType>(v.getType());
+  if (dstShape == srcType.getShape()) return v;
+  auto dstType = RankedTensorType::get(dstShape, srcType.getElementType());
+  SmallVector<Value> starts, lengths;
+  for (int64_t s : dstShape) {
+    starts.push_back(rewriter.create<arith::ConstantIndexOp>(loc, 0));
+    lengths.push_back(rewriter.create<arith::ConstantIndexOp>(loc, s));
+  }
+  return rewriter
+      .create<IREE::Flow::TensorSliceOp>(loc, dstType, v,
+                                         /*source_dims=*/ValueRange{}, starts,
+                                         lengths, /*result_dims=*/ValueRange{})
+      .getResult();
+}
+
 class AMDAIEPadContractionDispatchesPass
     : public impl::AMDAIEPadContractionDispatchesBase<
           AMDAIEPadContractionDispatchesPass> {
@@ -274,8 +356,8 @@ void AMDAIEPadContractionDispatchesPass::runOnOperation() {
   if (!hostAffinity) return;  // need a host device to place the padding dispatch
   int counter = 0;
 
-  // Executables padded already (shared by multiple dispatches): pad the
-  // executable once, but pad each caller's operands.
+  // Executables rewritten already (shared by multiple dispatches): rewrite the
+  // executable once, but pad/crop each caller's operands/result.
   DenseSet<Operation *> paddedExecutables;
 
   for (IREE::Flow::DispatchOp dispatch : dispatches) {
@@ -284,47 +366,74 @@ void AMDAIEPadContractionDispatchesPass::runOnOperation() {
 
     func::FuncOp func = getDispatchFunc(dispatch, module);
     if (!func) continue;
-    std::optional<MatmulKInfo> info = getMatmulKInfo(func);
+    std::optional<MatmulInfo> info = getMatmulInfo(func);
     if (!info) continue;
-
-    auto elemType = [](Value v) {
-      return cast<ShapedType>(v.getType()).getElementType();
-    };
-    std::optional<PaddingMultiples> mult = getPaddingMultiples(
-        target, elemType(info->matmul.getInputs()[0]),
-        elemType(info->matmul.getInputs()[1]),
-        elemType(info->matmul.getResults()[0]));
-    if (!mult) continue;
-
-    int64_t kPad = roundUpToMultiple(info->k, mult->k);
-    if (kPad == info->k) continue;
 
     int64_t lhsArgNo = info->lhsArg.getArgNumber();
     int64_t rhsArgNo = info->rhsArg.getArgNumber();
 
-    // Rewrite the executable bindings/loads to the padded K (matmul revalidates
-    // from the loaded operand types). Once per shared executable.
+    // Read the logical M/N/K from this caller's operands (robust to a shared
+    // executable whose bindings a previous caller already padded).
+    auto lhsType =
+        cast<RankedTensorType>(dispatch.getArguments()[lhsArgNo].getType());
+    auto rhsType =
+        cast<RankedTensorType>(dispatch.getArguments()[rhsArgNo].getType());
+    int64_t m = lhsType.getShape()[0];
+    int64_t k = lhsType.getShape()[1];
+    int64_t n = rhsType.getShape()[1];
+    Type outElemType =
+        cast<RankedTensorType>(info->matmul.getResult(0).getType())
+            .getElementType();
+
+    std::optional<PaddingMultiples> mult = getPaddingMultiples(
+        target, lhsType.getElementType(), rhsType.getElementType(),
+        outElemType);
+    if (!mult) continue;
+
+    int64_t mPad = roundUpToMultiple(m, mult->m);
+    int64_t nPad = roundUpToMultiple(n, mult->n);
+    int64_t kPad = roundUpToMultiple(k, mult->k);
+    if (mPad == m && nPad == n && kPad == k) continue;  // already divisible
+    // Inner output dim (N) padding needs a strided crop we can't express here;
+    // leave such dispatches untouched (VGG's N is always a tile multiple).
+    if (nPad != n) continue;
+    bool padM = mPad != m;
+
+    // Rewrite the executable once per shared executable: grow the LHS [M,K] /
+    // RHS [K,N] bindings; for M padding grow the output init, matmul result and
+    // store binding too (the dispatch stays fully divisible, cropped on host).
     if (paddedExecutables.insert(func.getOperation()).second) {
-      padBinding(rewriter, info->lhsArg, info->lhsLoad, /*dim=*/1, kPad);
-      padBinding(rewriter, info->rhsArg, info->rhsLoad, /*dim=*/0, kPad);
-      SmallVector<Type> argTypes(func.getArgumentTypes());
-      argTypes[lhsArgNo] = func.getArgument(lhsArgNo).getType();
-      argTypes[rhsArgNo] = func.getArgument(rhsArgNo).getType();
+      growBinding(rewriter, info->lhsArg, info->lhsLoad, {mPad, kPad});
+      growBinding(rewriter, info->rhsArg, info->rhsLoad, {kPad, n});
+      if (padM) {
+        growMatmulInit(rewriter, *info, mPad, n);
+        growOutputStore(rewriter, *info, mPad, n);
+      }
+      SmallVector<Type> argTypes(llvm::map_range(
+          func.getArguments(), [](BlockArgument a) { return a.getType(); }));
       func.setType(rewriter.getFunctionType(argTypes, /*results=*/{}));
     }
 
-    // Pad the host operands to the padded K via padding dispatches (correct
-    // strided placement for the LHS inner dim, which flow.tensor.update cannot
-    // express), then rewire the matmul dispatch to the padded operands.
+    // Pad this caller's host operands to the padded shapes, then rewire.
     rewriter.setInsertionPoint(dispatch);
-    Value lhsPadded = createPaddingDispatch(
-        rewriter, module, dispatch.getArguments()[lhsArgNo], /*dim=*/1, kPad,
-        hostAffinity, counter);
-    Value rhsPadded = createPaddingDispatch(
-        rewriter, module, dispatch.getArguments()[rhsArgNo], /*dim=*/0, kPad,
-        hostAffinity, counter);
+    Value lhsPadded =
+        createPaddingDispatch(rewriter, module, dispatch.getArguments()[lhsArgNo],
+                              {mPad, kPad}, hostAffinity, counter);
+    Value rhsPadded =
+        createPaddingDispatch(rewriter, module, dispatch.getArguments()[rhsArgNo],
+                              {kPad, n}, hostAffinity, counter);
     dispatch.getArgumentsMutable().slice(lhsArgNo, 1).assign(lhsPadded);
     dispatch.getArgumentsMutable().slice(rhsArgNo, 1).assign(rhsPadded);
+
+    // Grow this caller's result to [mPad, n] and crop it back to [m, n] on the
+    // host (contiguous outer-dim slice).
+    if (padM) {
+      Value result = dispatch.getResult(0);
+      result.setType(RankedTensorType::get({mPad, n}, outElemType));
+      rewriter.setInsertionPointAfter(dispatch);
+      Value cropped = createCropSlice(rewriter, result, {m, n});
+      result.replaceAllUsesExcept(cropped, cropped.getDefiningOp());
+    }
   }
 }
 
