@@ -27,6 +27,7 @@
 #include "iree/compiler/Dialect/Flow/IR/FlowOps.h"
 #include "iree/compiler/Dialect/HAL/IR/HALTypes.h"
 #include "iree/compiler/Dialect/Util/IR/UtilOps.h"
+#include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/Linalg/IR/LinalgInterfaces.h"
 
@@ -92,15 +93,37 @@ struct DeviceInfo {
   StringRef backend;
 };
 
+/// Returns true if the linalg op's reduction body is a multiply-accumulate
+/// (`out + lhs * rhs`), i.e. a real contraction/convolution rather than a
+/// pooling op. `isaConvolutionOpInterface` matches on indexing-map structure
+/// only and so also accepts pooling (max/min/sum over a window), which amd-aie
+/// cannot codegen; this body check distinguishes the two. Uses upstream MLIR
+/// (`linalg::detail::isContractionBody` + `arith`) so the classification stays
+/// backend-neutral (reusable for other accelerator backends).
+static bool hasMultiplyAccumulateBody(linalg::LinalgOp linalgOp) {
+  Block *body = linalgOp.getBlock();
+  if (!body) return false;
+  return linalg::detail::isContractionBody(
+      *body, [](Operation *mul, Operation *add) {
+        return isa<arith::MulFOp, arith::MulIOp>(mul) &&
+               isa<arith::AddFOp, arith::AddIOp>(add);
+      });
+}
+
 /// Returns true if `exe` contains a contraction/convolution op (the ops
-/// amd-aie can codegen), inspected structurally on the linalg IR.
+/// amd-aie can codegen), inspected structurally on the linalg IR. Pooling ops
+/// structurally look like convolutions but have a non-multiply-accumulate body
+/// (max/min); they are excluded via `hasMultiplyAccumulateBody` so they route
+/// to the host instead. (Contractions already imply a multiply-accumulate body,
+/// so that branch needs no extra check.)
 static bool executableIsContractionOrConv(IREE::Flow::ExecutableOp exe) {
   ModuleOp innerModule = exe.getInnerModule();
   if (!innerModule) return false;
   bool found = false;
   innerModule.walk([&](linalg::LinalgOp linalgOp) {
     if (linalg::isaContractionOpInterface(linalgOp) ||
-        linalg::isaConvolutionOpInterface(linalgOp)) {
+        (linalg::isaConvolutionOpInterface(linalgOp) &&
+         hasMultiplyAccumulateBody(linalgOp))) {
       found = true;
       return WalkResult::interrupt();
     }

@@ -155,3 +155,91 @@ module attributes {stream.affinity.default = #hal.device.affinity<@cpu>} {
     util.return %2 : tensor<128x128xf32>
   }
 }
+
+// -----
+
+// Convolution vs pooling: both match `isaConvolutionOpInterface` structurally
+// (windowed reduction), so the reduction body decides placement. A max-pool
+// generic (body: `max`) is NOT a multiply-accumulate and runs on the host; the
+// SAME structure with a mul-add body is a real convolution and runs on the NPU.
+// A named `linalg.conv_2d_nhwc_hwcf` (im2col-free direct conv) also runs on the
+// NPU, confirming the direct-conv routing path is preserved.
+
+module attributes {stream.affinity.default = #hal.device.affinity<@npu>} {
+  util.global private @cpu = #hal.device.target<"local", [#hal.executable.target<"llvm-cpu", "embedded-elf-x86_64", {}>]> : !hal.device
+  util.global private @npu = #hal.device.target<"amdxdna", [#hal.executable.target<"amd-aie", "amdaie-pdi-fb", {num_cols = 8 : i32, num_rows = 4 : i32, target_device = "npu4", ukernels = "none"}>]> : !hal.device
+  // Max-pool: structurally a convolution, body is `max` (not mul-add).
+  flow.executable private @dispatch_pool {
+    flow.executable.export public @maxpool workgroups() -> (index, index, index) {
+      %x, %y, %z = iree_tensor_ext.dispatch.workgroup_count_from_slice()
+      flow.return %x, %y, %z : index, index, index
+    }
+    builtin.module {
+      func.func @maxpool(%arg0: !iree_tensor_ext.dispatch.tensor<readonly:tensor<8x8x8xf32>>, %arg1: !iree_tensor_ext.dispatch.tensor<readonly:tensor<2x2xf32>>, %arg2: !iree_tensor_ext.dispatch.tensor<writeonly:tensor<8x4x4xf32>>) {
+        %0 = iree_tensor_ext.dispatch.tensor.load %arg0, offsets = [0, 0, 0], sizes = [8, 8, 8], strides = [1, 1, 1] : !iree_tensor_ext.dispatch.tensor<readonly:tensor<8x8x8xf32>> -> tensor<8x8x8xf32>
+        %1 = iree_tensor_ext.dispatch.tensor.load %arg1, offsets = [0, 0], sizes = [2, 2], strides = [1, 1] : !iree_tensor_ext.dispatch.tensor<readonly:tensor<2x2xf32>> -> tensor<2x2xf32>
+        %2 = tensor.empty() : tensor<8x4x4xf32>
+        %3 = linalg.generic {indexing_maps = [affine_map<(d0, d1, d2, d3, d4) -> (d0, d1 * 2 + d3, d2 * 2 + d4)>, affine_map<(d0, d1, d2, d3, d4) -> (d3, d4)>, affine_map<(d0, d1, d2, d3, d4) -> (d0, d1, d2)>], iterator_types = ["parallel", "parallel", "parallel", "reduction", "reduction"]} ins(%0, %1 : tensor<8x8x8xf32>, tensor<2x2xf32>) outs(%2 : tensor<8x4x4xf32>) {
+        ^bb0(%in: f32, %win: f32, %out: f32):
+          %4 = arith.maximumf %out, %in : f32
+          linalg.yield %4 : f32
+        } -> tensor<8x4x4xf32>
+        iree_tensor_ext.dispatch.tensor.store %3, %arg2, offsets = [0, 0, 0], sizes = [8, 4, 4], strides = [1, 1, 1] : tensor<8x4x4xf32> -> !iree_tensor_ext.dispatch.tensor<writeonly:tensor<8x4x4xf32>>
+        return
+      }
+    }
+  }
+  // Convolution generic: SAME structure as the pool, body is mul-add.
+  flow.executable private @dispatch_convgen {
+    flow.executable.export public @convgen workgroups() -> (index, index, index) {
+      %x, %y, %z = iree_tensor_ext.dispatch.workgroup_count_from_slice()
+      flow.return %x, %y, %z : index, index, index
+    }
+    builtin.module {
+      func.func @convgen(%arg0: !iree_tensor_ext.dispatch.tensor<readonly:tensor<8x8x8xf32>>, %arg1: !iree_tensor_ext.dispatch.tensor<readonly:tensor<2x2xf32>>, %arg2: !iree_tensor_ext.dispatch.tensor<writeonly:tensor<8x4x4xf32>>) {
+        %0 = iree_tensor_ext.dispatch.tensor.load %arg0, offsets = [0, 0, 0], sizes = [8, 8, 8], strides = [1, 1, 1] : !iree_tensor_ext.dispatch.tensor<readonly:tensor<8x8x8xf32>> -> tensor<8x8x8xf32>
+        %1 = iree_tensor_ext.dispatch.tensor.load %arg1, offsets = [0, 0], sizes = [2, 2], strides = [1, 1] : !iree_tensor_ext.dispatch.tensor<readonly:tensor<2x2xf32>> -> tensor<2x2xf32>
+        %2 = tensor.empty() : tensor<8x4x4xf32>
+        %3 = linalg.generic {indexing_maps = [affine_map<(d0, d1, d2, d3, d4) -> (d0, d1 * 2 + d3, d2 * 2 + d4)>, affine_map<(d0, d1, d2, d3, d4) -> (d3, d4)>, affine_map<(d0, d1, d2, d3, d4) -> (d0, d1, d2)>], iterator_types = ["parallel", "parallel", "parallel", "reduction", "reduction"]} ins(%0, %1 : tensor<8x8x8xf32>, tensor<2x2xf32>) outs(%2 : tensor<8x4x4xf32>) {
+        ^bb0(%in: f32, %win: f32, %out: f32):
+          %4 = arith.mulf %in, %win : f32
+          %5 = arith.addf %out, %4 : f32
+          linalg.yield %5 : f32
+        } -> tensor<8x4x4xf32>
+        iree_tensor_ext.dispatch.tensor.store %3, %arg2, offsets = [0, 0, 0], sizes = [8, 4, 4], strides = [1, 1, 1] : tensor<8x4x4xf32> -> !iree_tensor_ext.dispatch.tensor<writeonly:tensor<8x4x4xf32>>
+        return
+      }
+    }
+  }
+  // Named direct convolution (im2col-free path).
+  flow.executable private @dispatch_conv {
+    flow.executable.export public @conv workgroups() -> (index, index, index) {
+      %x, %y, %z = iree_tensor_ext.dispatch.workgroup_count_from_slice()
+      flow.return %x, %y, %z : index, index, index
+    }
+    builtin.module {
+      func.func @conv(%arg0: !iree_tensor_ext.dispatch.tensor<readonly:tensor<1x8x8x4xf32>>, %arg1: !iree_tensor_ext.dispatch.tensor<readonly:tensor<3x3x4x8xf32>>, %arg2: !iree_tensor_ext.dispatch.tensor<writeonly:tensor<1x6x6x8xf32>>) {
+        %cst = arith.constant 0.000000e+00 : f32
+        %0 = iree_tensor_ext.dispatch.tensor.load %arg0, offsets = [0, 0, 0, 0], sizes = [1, 8, 8, 4], strides = [1, 1, 1, 1] : !iree_tensor_ext.dispatch.tensor<readonly:tensor<1x8x8x4xf32>> -> tensor<1x8x8x4xf32>
+        %1 = iree_tensor_ext.dispatch.tensor.load %arg1, offsets = [0, 0, 0, 0], sizes = [3, 3, 4, 8], strides = [1, 1, 1, 1] : !iree_tensor_ext.dispatch.tensor<readonly:tensor<3x3x4x8xf32>> -> tensor<3x3x4x8xf32>
+        %2 = tensor.empty() : tensor<1x6x6x8xf32>
+        %3 = linalg.fill ins(%cst : f32) outs(%2 : tensor<1x6x6x8xf32>) -> tensor<1x6x6x8xf32>
+        %4 = linalg.conv_2d_nhwc_hwcf {dilations = dense<1> : tensor<2xi64>, strides = dense<1> : tensor<2xi64>} ins(%0, %1 : tensor<1x8x8x4xf32>, tensor<3x3x4x8xf32>) outs(%3 : tensor<1x6x6x8xf32>) -> tensor<1x6x6x8xf32>
+        iree_tensor_ext.dispatch.tensor.store %4, %arg2, offsets = [0, 0, 0, 0], sizes = [1, 6, 6, 8], strides = [1, 1, 1, 1] : tensor<1x6x6x8xf32> -> !iree_tensor_ext.dispatch.tensor<writeonly:tensor<1x6x6x8xf32>>
+        return
+      }
+    }
+  }
+  util.func public @conv_vs_pool(%img: tensor<8x8x8xf32>, %win: tensor<2x2xf32>, %cimg: tensor<1x8x8x4xf32>, %filt: tensor<3x3x4x8xf32>) -> (tensor<8x4x4xf32>, tensor<8x4x4xf32>, tensor<1x6x6x8xf32>) {
+    // CHECK: flow.dispatch @dispatch_pool::@maxpool
+    // CHECK-SAME: {stream.affinity = #hal.device.affinity<@cpu>}
+    %0 = flow.dispatch @dispatch_pool::@maxpool(%img, %win) : (tensor<8x8x8xf32>, tensor<2x2xf32>) -> tensor<8x4x4xf32>
+    // CHECK: flow.dispatch @dispatch_convgen::@convgen
+    // CHECK-SAME: {stream.affinity = #hal.device.affinity<@npu>}
+    %1 = flow.dispatch @dispatch_convgen::@convgen(%img, %win) : (tensor<8x8x8xf32>, tensor<2x2xf32>) -> tensor<8x4x4xf32>
+    // CHECK: flow.dispatch @dispatch_conv::@conv
+    // CHECK-SAME: {stream.affinity = #hal.device.affinity<@npu>}
+    %2 = flow.dispatch @dispatch_conv::@conv(%cimg, %filt) : (tensor<1x8x8x4xf32>, tensor<3x3x4x8xf32>) -> tensor<1x6x6x8xf32>
+    util.return %0, %1, %2 : tensor<8x4x4xf32>, tensor<8x4x4xf32>, tensor<1x6x6x8xf32>
+  }
+}
