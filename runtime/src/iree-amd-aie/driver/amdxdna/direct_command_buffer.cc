@@ -326,45 +326,31 @@ static iree_status_t iree_hal_amdxdna_direct_command_buffer_copy_buffer(
     iree_hal_copy_flags_t flags) {
   IREE_TRACE_ZONE_BEGIN(z0);
 
-  iree_hal_amdxdna_native_buffer_t* target_device_buffer =
-      iree_hal_amdxdna_buffer_handle(
-          iree_hal_buffer_allocated_buffer(target_ref.buffer));
-  void* target_device_buffer_ptr = nullptr;
+  // Copy via generic host mappings so a copy that crosses the device boundary
+  // (one endpoint an amdxdna BO, the other an llvm-cpu heap buffer) works. Both
+  // amdxdna buffers (host-mapped BOs, with cache invalidate/flush in their
+  // map/unmap) and plain host buffers implement map_range, so the memcpy sees
+  // device-written source data and flushes target data back to the device.
+  iree_hal_buffer_mapping_t source_mapping = {{0}};
   IREE_RETURN_AND_END_ZONE_IF_ERROR(
-      z0, iree_hal_amdxdna_native_buffer_map(target_device_buffer,
-                                             &target_device_buffer_ptr));
-  iree_device_size_t target_offset =
-      iree_hal_buffer_byte_offset(target_ref.buffer) + target_ref.offset;
-
-  iree_hal_amdxdna_native_buffer_t* source_device_buffer =
-      iree_hal_amdxdna_buffer_handle(
-          iree_hal_buffer_allocated_buffer(source_ref.buffer));
-  void* source_device_buffer_ptr = nullptr;
-  IREE_RETURN_AND_END_ZONE_IF_ERROR(
-      z0, iree_hal_amdxdna_native_buffer_map(source_device_buffer,
-                                             &source_device_buffer_ptr));
-  iree_device_size_t source_offset =
-      iree_hal_buffer_byte_offset(source_ref.buffer) + source_ref.offset;
-
-  // Sync the host-mapped source range so the host memcpy reads device-written
-  // data, then sync the target range back to device so a subsequent dispatch
-  // sees the freshly copied bytes.
-  IREE_RETURN_AND_END_ZONE_IF_ERROR(
-      z0, iree_hal_amdxdna_native_buffer_sync(
-              source_device_buffer,
-              iree_hal_amdxdna_native_sync_direction_t::device_to_host,
-              target_ref.length, source_offset));
-  memcpy(reinterpret_cast<uint8_t*>(target_device_buffer_ptr) + target_offset,
-         reinterpret_cast<uint8_t*>(source_device_buffer_ptr) + source_offset,
-         target_ref.length);
-  IREE_RETURN_AND_END_ZONE_IF_ERROR(
-      z0, iree_hal_amdxdna_native_buffer_sync(
-              target_device_buffer,
-              iree_hal_amdxdna_native_sync_direction_t::host_to_device,
-              target_ref.length, target_offset));
+      z0, iree_hal_buffer_map_range(
+              source_ref.buffer, IREE_HAL_MAPPING_MODE_SCOPED,
+              IREE_HAL_MEMORY_ACCESS_READ, source_ref.offset, target_ref.length,
+              &source_mapping));
+  iree_hal_buffer_mapping_t target_mapping = {{0}};
+  iree_status_t status = iree_hal_buffer_map_range(
+      target_ref.buffer, IREE_HAL_MAPPING_MODE_SCOPED,
+      IREE_HAL_MEMORY_ACCESS_DISCARD_WRITE, target_ref.offset, target_ref.length,
+      &target_mapping);
+  if (iree_status_is_ok(status)) {
+    memcpy(target_mapping.contents.data, source_mapping.contents.data,
+           target_ref.length);
+    status = iree_hal_buffer_unmap_range(&target_mapping);
+  }
+  iree_status_ignore(iree_hal_buffer_unmap_range(&source_mapping));
 
   IREE_TRACE_ZONE_END(z0);
-  return iree_ok_status();
+  return status;
 }
 
 // ===========================================================================
