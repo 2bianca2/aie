@@ -342,6 +342,19 @@ LogicalResult expandLargeDimIntoLinearDims(
     int64_t stride = staticStrideVals[strides.size() - i - 1];
     int64_t maxSize = maxSizes[maxSizes.size() - i - 1];
     OpFoldResult offset = offsets[offsets.size() - i - 1];
+    // A stride-0 (pure repeat) dimension does not lower to a wrap-limited
+    // intra/iteration address register; it lowers to the channel repeat-count
+    // register (much larger max). Splitting it against the iteration wrap max
+    // would be both unnecessary and harmful: it turns one repeat dim into two
+    // stride-0 dims, only one of which fits the single repeat slot, so the
+    // leftover would consume a scarce intra addressing dimension. Leave it
+    // intact.
+    if (stride == 0) {
+      newOffsets.push_back(offset);
+      newStrides.push_back(getAsIndexOpFoldResult(ctx, stride));
+      newSizes.push_back(getAsIndexOpFoldResult(ctx, size));
+      continue;
+    }
     do {
       int64_t factor = detail::findFactorResultingInSmallerSize(size, maxSize);
       if (factor == 1 || factor == size) {

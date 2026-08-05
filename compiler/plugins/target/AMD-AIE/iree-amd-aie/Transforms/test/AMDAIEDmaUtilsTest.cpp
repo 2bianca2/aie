@@ -726,6 +726,9 @@ TEST_F(FoldAndExpandTest, NoDimsExpand) {
   checkExpandDimIntoLinearDims({0}, {11}, {1}, {7}, {0}, {11}, {1}, false);
   checkExpandDimIntoLinearDims({0, 8}, {16, 8}, {16, 1}, {16, 8}, {0, 8},
                                {16, 8}, {16, 1}, false);
+  // A stride-0 (pure repeat) dim is left intact even when its size exceeds the
+  // max size: it lowers to the repeat-count register, not a wrap-limited one.
+  checkExpandDimIntoLinearDims({0}, {98}, {0}, {63}, {0}, {98}, {0}, false);
 }
 
 TEST_F(FoldAndExpandTest, ExpandLargeDim) {
@@ -743,6 +746,10 @@ TEST_F(FoldAndExpandTest, ExpandLargeDim) {
                                {2, 3, 2, 4}, {9, 3, 4, 1}, true);
   checkExpandDimIntoLinearDims({5, 3}, {6, 8}, {3, 1}, {3, 2}, {0, 5, 0, 0, 3},
                                {2, 3, 2, 2, 2}, {9, 3, 4, 2, 1}, true);
+  // A stride-0 repeat dim stays intact while a neighboring stride-1 dim is
+  // expanded: only the non-repeat dim splits ({8} -> {2, 4}).
+  checkExpandDimIntoLinearDims({0, 0}, {98, 8}, {0, 1}, {63, 7}, {0, 0, 0},
+                               {98, 2, 4}, {0, 4, 1}, true);
 }
 
 //===----------------------------------------------------------------------===//
