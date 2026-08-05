@@ -6,6 +6,9 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 args=(--rm -it)
 npu="$(npu_device)"
-[ -n "$npu" ] && args+=(--device="/dev/accel/$npu")
+# --ulimit memlock=-1: amdxdna HOST_ONLY BOs pin memory (RLIMIT_MEMLOCK); the
+# default container cap (often 8MB) makes large im2col/activation BOs fail with
+# errno 11 (EAGAIN). Unlock it so full-resolution models (e.g. VGG) can run.
+[ -n "$npu" ] && args+=(--device="/dev/accel/$npu" --ulimit memlock=-1)
 
 exec docker run "${args[@]}" "$IMAGE_DEPLOY" "${@:-bash}"

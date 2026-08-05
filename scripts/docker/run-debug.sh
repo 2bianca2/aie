@@ -21,6 +21,10 @@ if [ -n "$npu" ]; then
   # even when the node is 0660 root:render (not just the amdxdna-udev 0666 case)
   gid="$(device_gid "$npu")"
   [ -n "$gid" ] && args+=(--group-add "$gid")
+  # amdxdna HOST_ONLY BOs pin memory (RLIMIT_MEMLOCK); the default container cap
+  # (often 8MB) makes large im2col/activation BOs fail with errno 11 (EAGAIN).
+  # Unlock it so full-resolution models (e.g. VGG at 224x224) can run.
+  args+=(--ulimit memlock=-1)
 fi
 args+=(-v "$root:/workspace" -w /workspace -e HOME=/workspace -e PEANO_INSTALL_DIR=/workspace/llvm-aie)
 
