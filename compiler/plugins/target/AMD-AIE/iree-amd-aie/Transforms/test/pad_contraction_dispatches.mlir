@@ -270,3 +270,63 @@ module attributes {stream.affinity.default = #hal.device.affinity<@npu>} {
     util.return %0 : tensor<256x64xf32>
   }
 }
+
+// -----
+
+// A transpose_b matmul (RHS = [N, K], the layout an ONNX Gemm lowers to) whose
+// inner output dim N=200 is not a multiple of the N tile (8*8 = 64) is padded to
+// N=256. The N and K dims are read from the matmul's indexing maps, so N is taken
+// from RHS dim 0 (not mistaken for K at RHS dim 1): the RHS grows on its N dim
+// (dim 0), the output grows to [32,256] and is cropped back to [32,200]. M=32 and
+// K=64 are already divisible, so only the RHS gets a padding dispatch.
+
+// CHECK-LABEL: func.func @matmul_tb
+// CHECK-SAME:    %arg0: !iree_tensor_ext.dispatch.tensor<readonly:tensor<32x64xbf16>>
+// CHECK-SAME:    %arg1: !iree_tensor_ext.dispatch.tensor<readonly:tensor<256x64xbf16>>
+// CHECK-SAME:    %arg2: !iree_tensor_ext.dispatch.tensor<writeonly:tensor<32x256xf32>>
+// CHECK:         linalg.matmul {{.*}}ins(%{{.+}}, %{{.+}} : tensor<32x64xbf16>, tensor<256x64xbf16>) outs(%{{.+}} : tensor<32x256xf32>)
+// CHECK:         iree_tensor_ext.dispatch.tensor.store %{{.+}}, %arg2, offsets = [0, 0], sizes = [32, 256]
+
+// Only the RHS is zero-padded (N 200 -> 256 on its dim 0); the result is cropped
+// back on N.
+// CHECK:       flow.executable private @pad_executable_0
+// CHECK:         tensor.pad %{{.+}} low[0, 0] high[56, 0]
+// CHECK:       flow.executable private @crop_executable_1
+// CHECK:         tensor.extract_slice %{{.+}}[0, 0] [32, 200] [1, 1]
+
+// CHECK-LABEL: util.func public @main_tb
+// CHECK:         %[[RPAD:.+]] = flow.dispatch @pad_executable_0::@pad_dispatch_0(%arg1)
+// CHECK-SAME:      {stream.affinity = #hal.device.affinity<@cpu>}
+// CHECK-SAME:      : (tensor<200x64xbf16>) -> tensor<256x64xbf16>
+// CHECK:         %[[MMR:.+]] = flow.dispatch @dispatch_tb::@matmul_tb(%arg0, %[[RPAD]])
+// CHECK-SAME:      {stream.affinity = #hal.device.affinity<@npu>}
+// CHECK-SAME:      : (tensor<32x64xbf16>, tensor<256x64xbf16>) -> tensor<32x256xf32>
+// CHECK:         flow.dispatch @crop_executable_1::@crop_dispatch_1(%[[MMR]])
+// CHECK-SAME:      {stream.affinity = #hal.device.affinity<@cpu>}
+// CHECK-SAME:      : (tensor<32x256xf32>) -> tensor<32x200xf32>
+module attributes {stream.affinity.default = #hal.device.affinity<@npu>} {
+  util.global private @npu = #hal.device.target<"amdxdna", [#hal.executable.target<"amd-aie", "amdaie-pdi-fb", {num_cols = 8 : i32, num_rows = 4 : i32, target_device = "npu4", ukernels = "none"}>]> : !hal.device
+  util.global private @cpu = #hal.device.target<"local", [#hal.executable.target<"llvm-cpu", "embedded-elf-x86_64", {}>]> : !hal.device
+  flow.executable private @dispatch_tb {
+    flow.executable.export public @matmul_tb workgroups() -> (index, index, index) {
+      %x, %y, %z = iree_tensor_ext.dispatch.workgroup_count_from_slice()
+      flow.return %x, %y, %z : index, index, index
+    }
+    builtin.module {
+      func.func @matmul_tb(%arg0: !iree_tensor_ext.dispatch.tensor<readonly:tensor<32x64xbf16>>, %arg1: !iree_tensor_ext.dispatch.tensor<readonly:tensor<200x64xbf16>>, %arg2: !iree_tensor_ext.dispatch.tensor<writeonly:tensor<32x200xf32>>) {
+        %cst = arith.constant 0.000000e+00 : f32
+        %0 = iree_tensor_ext.dispatch.tensor.load %arg0, offsets = [0, 0], sizes = [32, 64], strides = [1, 1] : !iree_tensor_ext.dispatch.tensor<readonly:tensor<32x64xbf16>> -> tensor<32x64xbf16>
+        %1 = iree_tensor_ext.dispatch.tensor.load %arg1, offsets = [0, 0], sizes = [200, 64], strides = [1, 1] : !iree_tensor_ext.dispatch.tensor<readonly:tensor<200x64xbf16>> -> tensor<200x64xbf16>
+        %2 = tensor.empty() : tensor<32x200xf32>
+        %3 = linalg.fill ins(%cst : f32) outs(%2 : tensor<32x200xf32>) -> tensor<32x200xf32>
+        %4 = linalg.matmul indexing_maps = [affine_map<(d0, d1, d2) -> (d0, d2)>, affine_map<(d0, d1, d2) -> (d1, d2)>, affine_map<(d0, d1, d2) -> (d0, d1)>] ins(%0, %1 : tensor<32x64xbf16>, tensor<200x64xbf16>) outs(%3 : tensor<32x200xf32>) -> tensor<32x200xf32>
+        iree_tensor_ext.dispatch.tensor.store %4, %arg2, offsets = [0, 0], sizes = [32, 200], strides = [1, 1] : tensor<32x200xf32> -> !iree_tensor_ext.dispatch.tensor<writeonly:tensor<32x200xf32>>
+        return
+      }
+    }
+  }
+  util.func public @main_tb(%arg0: tensor<32x64xbf16>, %arg1: tensor<200x64xbf16>) -> tensor<32x200xf32> {
+    %0 = flow.dispatch @dispatch_tb::@matmul_tb(%arg0, %arg1) {stream.affinity = #hal.device.affinity<@npu>} : (tensor<32x64xbf16>, tensor<200x64xbf16>) -> tensor<32x200xf32>
+    util.return %0 : tensor<32x200xf32>
+  }
+}

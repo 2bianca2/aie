@@ -232,6 +232,18 @@ static void growOutputStore(IRRewriter &rewriter, MatmulInfo &info,
   rewriter.eraseOp(info.store);
 }
 
+/// For a `linalg.matmul` operand `map`, returns the operand-dim position that the
+/// given contraction loop dim (M=0, N=1, K=2 -- fixed by linalg.matmul's iterator
+/// order; transpose variants only permute the operand maps, not the loop order)
+/// occupies. Lets us read each operand's M/N/K extents from its own layout, so a
+/// transpose_b matmul (RHS = [N, K], as an ONNX Gemm lowers to) is handled, not
+/// just the plain RHS = [K, N] layout.
+static unsigned operandDimForLoop(AffineMap map, unsigned loopDim) {
+  for (unsigned i = 0, e = map.getNumResults(); i < e; ++i)
+    if (cast<AffineDimExpr>(map.getResult(i)).getPosition() == loopDim) return i;
+  llvm_unreachable("matmul operand map missing expected loop dim");
+}
+
 /// Returns a device affinity pinned to a host (non-amd-aie) device global, or
 /// null if none is declared. The padding dispatch runs here (the CPU), where the
 /// strided insert is trivially codegen-able.
@@ -420,14 +432,22 @@ void AMDAIEPadContractionDispatchesPass::runOnOperation() {
     int64_t rhsArgNo = info->rhsArg.getArgNumber();
 
     // Read the logical M/N/K from this caller's operands (robust to a shared
-    // executable whose bindings a previous caller already padded).
+    // executable whose bindings a previous caller already padded). Locate each
+    // operand's M/N/K dim from the matmul's indexing maps rather than assuming
+    // LHS=[M,K]/RHS=[K,N], so transpose_b (RHS=[N,K], from an ONNX Gemm) reads N
+    // from the correct dim instead of mistaking K for N.
     auto lhsType =
         cast<RankedTensorType>(dispatch.getArguments()[lhsArgNo].getType());
     auto rhsType =
         cast<RankedTensorType>(dispatch.getArguments()[rhsArgNo].getType());
-    int64_t m = lhsType.getShape()[0];
-    int64_t k = lhsType.getShape()[1];
-    int64_t n = rhsType.getShape()[1];
+    SmallVector<AffineMap> maps = info->matmul.getIndexingMapsArray();
+    unsigned lhsMPos = operandDimForLoop(maps[0], /*M=*/0);
+    unsigned lhsKPos = operandDimForLoop(maps[0], /*K=*/2);
+    unsigned rhsNPos = operandDimForLoop(maps[1], /*N=*/1);
+    unsigned rhsKPos = operandDimForLoop(maps[1], /*K=*/2);
+    int64_t m = lhsType.getShape()[lhsMPos];
+    int64_t k = lhsType.getShape()[lhsKPos];
+    int64_t n = rhsType.getShape()[rhsNPos];
     Type outElemType =
         cast<RankedTensorType>(info->matmul.getResult(0).getType())
             .getElementType();
@@ -445,13 +465,21 @@ void AMDAIEPadContractionDispatchesPass::runOnOperation() {
     // cropped back on the host by a single extract_slice dispatch.
     bool padOut = mPad != m || nPad != n;
 
-    // Rewrite the executable once per shared executable: grow the LHS [M,K] /
-    // RHS [K,N] bindings; when an output dim is padded grow the output init,
-    // matmul result and store binding too (the dispatch stays fully divisible,
-    // cropped on host).
+    // Padded operand shapes placed at each operand's own M/N/K dim positions, so
+    // the RHS layout (plain [K,N] or transpose_b [N,K]) is preserved.
+    SmallVector<int64_t, 2> lhsPad(2), rhsPad(2);
+    lhsPad[lhsMPos] = mPad;
+    lhsPad[lhsKPos] = kPad;
+    rhsPad[rhsNPos] = nPad;
+    rhsPad[rhsKPos] = kPad;
+
+    // Rewrite the executable once per shared executable: grow the LHS and RHS
+    // bindings; when an output dim is padded grow the output init, matmul result
+    // and store binding too (the dispatch stays fully divisible, cropped on
+    // host). The output is always [M,N], so its grown shape is [mPad, nPad].
     if (paddedExecutables.insert(func.getOperation()).second) {
-      growBinding(rewriter, info->lhsArg, info->lhsLoad, {mPad, kPad});
-      growBinding(rewriter, info->rhsArg, info->rhsLoad, {kPad, nPad});
+      growBinding(rewriter, info->lhsArg, info->lhsLoad, lhsPad);
+      growBinding(rewriter, info->rhsArg, info->rhsLoad, rhsPad);
       if (padOut) {
         growMatmulInit(rewriter, *info, mPad, nPad);
         growOutputStore(rewriter, *info, mPad, nPad);
@@ -465,10 +493,10 @@ void AMDAIEPadContractionDispatchesPass::runOnOperation() {
     rewriter.setInsertionPoint(dispatch);
     Value lhsPadded =
         createPaddingDispatch(rewriter, module, dispatch.getArguments()[lhsArgNo],
-                              {mPad, kPad}, hostAffinity, counter);
+                              lhsPad, hostAffinity, counter);
     Value rhsPadded =
         createPaddingDispatch(rewriter, module, dispatch.getArguments()[rhsArgNo],
-                              {kPad, nPad}, hostAffinity, counter);
+                              rhsPad, hostAffinity, counter);
     dispatch.getArgumentsMutable().slice(lhsArgNo, 1).assign(lhsPadded);
     dispatch.getArgumentsMutable().slice(rhsArgNo, 1).assign(rhsPadded);
 
