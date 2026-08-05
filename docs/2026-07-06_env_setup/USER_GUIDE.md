@@ -40,6 +40,14 @@ docker info >/dev/null && echo "docker OK (sudo 불필요)"   # 권한오류가 
 ```
 참고: 설치 후 `source /opt/xilinx/xrt/setup.sh && xrt-smi examine` 로 NPU가 인식되는지 확인한다.
 
+### 1-3. (대용량 모델) NPU dispatch 타임아웃 상향
+기본 2초 TDR이 크고 느린 dispatch를 abort(`ert state 6`)한다. 대용량 모델 전 1회 설정(재부팅 유지).
+```bash
+echo "options amdxdna timeout_in_sec=60" | sudo tee /etc/modprobe.d/amdxdna.conf
+sudo modprobe -r amdxdna && sudo modprobe amdxdna   # 즉시 반영("in use"면 컨테이너 종료 후)
+cat /sys/module/amdxdna/parameters/timeout_in_sec   # 60 확인
+```
+
 ---
 
 ## Part 2. 개발용 컨테이너 (빌드 + 검증)
@@ -165,7 +173,8 @@ ctest --test-dir build -R amd-aie --output-on-failure   # (선택) 테스트
 gunzip -c iree-amd-aie-deploy.tar.gz | docker load
 
 NPU=$(ls /dev/accel/ | head -1)
-docker run --rm -it --device=/dev/accel/$NPU iree-amd-aie:deploy bash
+# --ulimit memlock=-1: 대용량 모델 큰 BO의 memlock 제한 회피 (run-deploy.sh는 이미 적용)
+docker run --rm -it --device=/dev/accel/$NPU --ulimit memlock=-1 iree-amd-aie:deploy bash
 
 # 컨테이너 안: 모델 → MLIR → NPU
 python3 -m iree.compiler.tools.import_onnx model.onnx -o model.mlir   # PyTorch는 fx_importer

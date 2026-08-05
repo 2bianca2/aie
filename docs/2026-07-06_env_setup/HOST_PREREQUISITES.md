@@ -20,6 +20,7 @@ dev/배포 컨테이너를 쓰기 **전에 호스트를 준비**하는 문서다
 | NPU 디바이스 노드·권한 | `accelN` 번호는 **인덱스 기반**이라 고정 아님. 권한이 다르면 `--group-add` 필요 | `ls -l /dev/accel/` | `/dev/accel/accel0` (grp `render`, mode `666` → group-add 불필요) |
 | NPU 펌웨어 | 호스트에 있어야 함 | `ls /usr/lib/firmware/amdnpu` | 존재 (`1502_00`, `17f0_*`) |
 | Docker | Engine + daemon 필요 | `docker --version` / `docker info` | 29.5.3 |
+| NPU dispatch 타임아웃(TDR) | 크고 느린 dispatch가 2초에 abort | `cat /sys/module/amdxdna/parameters/timeout_in_sec` | 60 (대용량 모델용; 기본 2) |
 
 > 참고(동작 필수는 아님): **CPU/코어 수**(`nproc`) — 빌드 병렬도·발열 판단용, 코어 적거나 노트북이면
 > `DEV_CONTAINER.md §5`의 자원 제한 참고(검증 환경은 Ryzen AI 9 HX 370, 12c/24t). **호스트 XRT**(선택) —
@@ -68,6 +69,13 @@ newgrp docker    # 현재 셸에 즉시 적용 (또는 완전 로그아웃 후 �
 정확한 커밋 일치가 필수는 아니다(레퍼런스 호스트도 README의 커밋과 다른 2.20.0 계열로 동작). **최종 확인은
 실행으로 한다**: `source /opt/xilinx/xrt/setup.sh && xrt-smi examine`로 NPU가 잡히고 `RUN.md`의 샘플 모델이
 실행되면 호환된 것이다. (SHIM은 git에서 빌드되어 컨테이너에 포함되므로 별도 설치가 필요 없다 — `DEV_CONTAINER.md §0` 참조.)
+
+### NPU dispatch 타임아웃 (대용량 모델)
+기본 2초 TDR이 크고 느린 dispatch를 abort한다. 대용량 모델용으로 상향(1회, 재부팅 유지):
+```bash
+echo "options amdxdna timeout_in_sec=60" | sudo tee /etc/modprobe.d/amdxdna.conf
+sudo modprobe -r amdxdna && sudo modprobe amdxdna
+```
 
 ---
 
