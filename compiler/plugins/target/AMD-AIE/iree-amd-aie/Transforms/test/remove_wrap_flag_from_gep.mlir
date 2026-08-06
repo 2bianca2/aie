@@ -1,4 +1,4 @@
-// RUN: iree-opt --pass-pipeline="builtin.module(func.func(iree-amdaie-remove-wrap-flag-from-gep))" %s | FileCheck %s
+// RUN: iree-opt --pass-pipeline="builtin.module(llvm.func(iree-amdaie-remove-wrap-flag-from-gep))" %s | FileCheck %s
 
 // Check that nuw and nusw are removed.
 // CHECK-LABEL: optimized_func

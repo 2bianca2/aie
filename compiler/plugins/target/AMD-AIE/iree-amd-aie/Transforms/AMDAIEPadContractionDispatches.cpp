@@ -260,6 +260,14 @@ static IREE::HAL::DeviceAffinityAttr getHostAffinity(ModuleOp module) {
   // with a third backend declared, the first non-amd-aie device need not be a
   // host at all (an accelerator would be picked, and the padding dispatch would
   // land on a device that cannot codegen it).
+  //
+  // The table currently recognizes only llvm-cpu as a host, so a host declared
+  // with any other backend yields null here and the callers below return
+  // without padding anything. That is silent: the dispatch that needed padding
+  // simply fails divisibility much later. The right shape is to move the check
+  // after the dispatch walk, so "nothing to pad" and "something to pad but
+  // nowhere to put it" can be told apart and only the latter is reported. Not
+  // done here because every declarable host today is llvm-cpu.
   return getFirstDeviceWithRole(module, DeviceRole::Host);
 }
 
