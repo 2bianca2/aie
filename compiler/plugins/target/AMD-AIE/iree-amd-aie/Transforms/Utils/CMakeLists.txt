@@ -12,6 +12,7 @@ iree_cc_library(
   NAME
     Utils
   HDRS
+    "AMDAIEDevicePlacementUtils.h"
     "AMDAIEDmaUtils.h"
     "AMDAIELogicalObjFifoSplittingUtils.h"
     "AMDAIEOpUtils.h"
@@ -19,6 +20,7 @@ iree_cc_library(
     "AMDAIETransactionBuilder.h"
     "AMDAIEUtils.h"
   SRCS
+    "AMDAIEDevicePlacementUtils.cpp"
     "AMDAIEDmaUtils.cpp"
     "AMDAIELogicalObjFifoSplittingUtils.cpp"
     "AMDAIETileSizeSelectionUtils.cpp"

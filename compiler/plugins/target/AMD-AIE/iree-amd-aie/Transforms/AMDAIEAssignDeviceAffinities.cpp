@@ -24,6 +24,7 @@
 // multiple same-role devices currently uses the first one (see policy TODO).
 
 #include "iree-amd-aie/Transforms/Passes.h"
+#include "iree-amd-aie/Transforms/Utils/AMDAIEDevicePlacementUtils.h"
 #include "iree/compiler/Dialect/Flow/IR/FlowOps.h"
 #include "iree/compiler/Dialect/HAL/IR/HALTypes.h"
 #include "iree/compiler/Dialect/Util/IR/UtilOps.h"
@@ -37,24 +38,15 @@ namespace mlir::iree_compiler::AMDAIE {
 
 namespace {
 
-/// Returns the backend of the device global's target attr (e.g. "amd-aie",
-/// "llvm-cpu"), or empty if the global is not a single device target.
-static StringRef getDeviceBackend(IREE::Util::GlobalOpInterface global) {
-  auto targetAttr = dyn_cast_or_null<IREE::HAL::DeviceTargetAttr>(
-      global.getGlobalInitialValue());
-  if (!targetAttr) return {};
-  ArrayRef<IREE::HAL::ExecutableTargetAttr> targets =
-      targetAttr.getExecutableTargets();
-  if (targets.empty()) return {};
-  return targets.front().getBackend().getValue();
-}
-
 //===----------------------------------------------------------------------===//
-// Device-capability table (single source of truth)
+// Device-capability table
 //
-// Maps a device backend to its role and a backend pair to its topology link
-// capability. Both the classification and the topology seams read this table;
-// supporting new hardware means adding entries here (and nothing else).
+// The table itself lives in Utils/AMDAIEDevicePlacementUtils.{h,cpp} so the
+// other passes that need to find a host or an accelerator resolve it the same
+// way (AMDAIEPadContractionDispatches places its padding dispatches on the
+// host). Maps a device backend to its role and a backend pair to its topology
+// link capability; both the classification and the topology seams below read
+// it.
 //
 // Adding an entry is necessary but not sufficient to support a second
 // accelerator backend, for two reasons:
@@ -71,36 +63,6 @@ static StringRef getDeviceBackend(IREE::Util::GlobalOpInterface global) {
 //    dispatches that already carry an affinity is the minimum needed before
 //    that configuration can work.
 //===----------------------------------------------------------------------===//
-
-enum class DeviceRole { Host, Accelerator, Unknown };
-
-/// Role of a device backend: Accelerator = a backend this pass offloads
-/// contraction/conv to; Host = the CPU fallback for everything else.
-static DeviceRole deviceRole(StringRef backend) {
-  if (backend == "llvm-cpu") return DeviceRole::Host;
-  if (backend == "amd-aie") return DeviceRole::Accelerator;
-  return DeviceRole::Unknown;  // not managed by this pass
-}
-
-struct LinkCapability {
-  bool unifiedMemory = false;
-  bool transparentAccess = false;
-};
-
-/// Directed link capability between two device backends. IREE does not derive
-/// the topology (it only consumes it), and `transparent_access` is a per-pair
-/// hardware property, so this defaults to staging (no transparent access) and
-/// only known-good pairs are marked true.
-static LinkCapability linkFlags(StringRef srcBackend, StringRef dstBackend) {
-  // npu4 (amd-aie) and the CPU share system memory on the integrated APU, so
-  // either can access the other's buffers without staging (validated e2e).
-  bool amdAieCpuPair =
-      (srcBackend == "amd-aie" && dstBackend == "llvm-cpu") ||
-      (srcBackend == "llvm-cpu" && dstBackend == "amd-aie");
-  if (amdAieCpuPair)
-    return {/*unifiedMemory=*/false, /*transparentAccess=*/true};
-  return {};  // conservative default: stage (copy) across the boundary.
-}
 
 /// A classified device global: its symbol reference and backend.
 struct DeviceInfo {

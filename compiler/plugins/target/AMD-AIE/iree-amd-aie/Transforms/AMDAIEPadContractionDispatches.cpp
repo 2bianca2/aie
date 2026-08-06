@@ -39,6 +39,7 @@
 // logic is portable if device placement ever moves to a later (Stream) stage.
 
 #include "iree-amd-aie/Transforms/Passes.h"
+#include "iree-amd-aie/Transforms/Utils/AMDAIEDevicePlacementUtils.h"
 #include "iree-amd-aie/Transforms/Utils/AMDAIEUtils.h"
 #include "iree-amd-aie/aie_runtime/iree_aie_runtime.h"
 #include "iree/compiler/Dialect/Flow/IR/FlowOps.h"
@@ -255,20 +256,11 @@ static unsigned operandDimForLoop(AffineMap map, unsigned loopDim) {
 /// null if none is declared. The padding dispatch runs here (the CPU), where the
 /// strided insert is trivially codegen-able.
 static IREE::HAL::DeviceAffinityAttr getHostAffinity(ModuleOp module) {
-  MLIRContext *ctx = module.getContext();
-  for (auto global : module.getOps<IREE::Util::GlobalOpInterface>()) {
-    auto deviceTarget = dyn_cast_or_null<IREE::HAL::DeviceTargetAttr>(
-        global.getGlobalInitialValue());
-    if (!deviceTarget) continue;
-    ArrayRef<IREE::HAL::ExecutableTargetAttr> targets =
-        deviceTarget.getExecutableTargets();
-    if (targets.empty() || targets.front().getBackend().getValue() == "amd-aie")
-      continue;
-    return IREE::HAL::DeviceAffinityAttr::get(
-        ctx, FlatSymbolRefAttr::get(ctx, global.getGlobalName()),
-        /*queue_mask=*/-1ll);
-  }
-  return {};
+  // Ask the shared capability table rather than testing for "not amd-aie":
+  // with a third backend declared, the first non-amd-aie device need not be a
+  // host at all (an accelerator would be picked, and the padding dispatch would
+  // land on a device that cannot codegen it).
+  return getFirstDeviceWithRole(module, DeviceRole::Host);
 }
 
 /// Creates a `flow.executable` + `flow.dispatch` that zero-pads `v` up to
