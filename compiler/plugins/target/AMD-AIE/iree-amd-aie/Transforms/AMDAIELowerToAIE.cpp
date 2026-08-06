@@ -249,8 +249,11 @@ AIE::ShimDMAAllocationOp AIEDeviceBuilder::createShimDmaAllocation(
   // A `memref.global` declares plain storage and cannot carry a strided/offset
   // layout (it fails LLVM translation otherwise). The shim buffer's memref may
   // carry a non-zero base offset (a constant/transient packed at an offset in a
-  // shared pool); that offset is folded into the DMA access pattern by
-  // AMDAIEConvertToDma, so the global only needs the shape and element type.
+  // shared pool). Dropping the layout here is safe because that offset never
+  // needs to reach the global: AMDAIEConvertToDma leaves it on a
+  // `memref.reinterpret_cast` over the same subspan-backed source, and
+  // AMDAIEControlCodeLowering reads it back from there and folds it into the BD
+  // base address. So the global only needs the shape and element type.
   auto shimGlobalType =
       MemRefType::get(memrefType.getShape(), memrefType.getElementType(),
                       MemRefLayoutAttrInterface{}, memrefType.getMemorySpace());

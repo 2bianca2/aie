@@ -641,3 +641,45 @@ module attributes {hal.executable.target = #executable_target_amdaie_xclbin_fb} 
 // ADD2-LABEL:   @half_npu_dma_cpy_nd_reinterpret_base_offset
 // ADD2-COUNT-2:   amdaie.npu.address_patch {arg_idx = 2
 // ADD2-NOT:       amdaie.npu.address_patch
+
+// -----
+
+// An access pattern that cannot be folded within the shim BD's `intra`
+// addressing dimensions must be reported. This used to be an assert, which
+// meant a release build instead underflowed `numIntraAddrDim - size()` (uint8_t
+// minus size_t) and tried an astronomically large insert.
+
+#executable_target_amdaie_xclbin_fb = #hal.executable.target<"amd-aie", "amdaie-xclbin-fb", {target_device = "npu1_4col", ukernels = "none"}>
+#pipeline_layout = #hal.pipeline.layout<bindings = [#hal.pipeline.binding<storage_buffer, "ReadOnly|Indirect">], flags = Indirect>
+module attributes {hal.executable.target = #executable_target_amdaie_xclbin_fb} {
+  func.func @access_pattern_exceeds_intra_dims() {
+    %c0 = arith.constant 0 : index
+    %c1 = arith.constant 1 : index
+    amdaie.workgroup {
+      %tile = amdaie.tile(%c0, %c1)
+      %tile_0 = amdaie.tile(%c0, %c0)
+      %buffer = amdaie.buffer(%tile) : memref<2048xi32, 1 : i32>
+      %lock = amdaie.lock(%tile(4), 4)
+      %lock_2 = amdaie.lock(%tile(5), 0)
+      %0 = amdaie.logicalobjectfifo.from_buffers({%buffer}, {%lock}, {%lock_2}) : memref<2048xi32, 1 : i32> -> !amdaie.logicalobjectfifo<memref<2048xi32, 1 : i32>, 1>
+      %1 = hal.interface.binding.subspan layout(#pipeline_layout) binding(0) alignment(64) offset(%c0) flags("ReadOnly|Indirect") : memref<2048xi32>
+      %2 = amdaie.logicalobjectfifo.placeholder{%tile_0} : !amdaie.logicalobjectfifo<memref<2048xi32>>
+      %channel = amdaie.channel(%tile_0, 0, port_type = DMA, direction = MM2S)
+      %channel_3 = amdaie.channel(%tile, 0, port_type = DMA, direction = S2MM)
+      %3 = amdaie.flow({%channel} -> {%channel_3}) {is_packet_flow = true, packet_id = 0 : ui8}
+      %4 = amdaie.connection(%0 {%channel_3}, %2 {%channel}, flow = %3) {connection_type = #amdaie<connection_type Packet>} : (!amdaie.logicalobjectfifo<memref<2048xi32, 1 : i32>, 1>, !amdaie.logicalobjectfifo<memref<2048xi32>>)
+      amdaie.controlcode {
+        %5 = amdaie.logicalobjectfifo.from_memref %1, {%tile_0} : memref<2048xi32> -> !amdaie.logicalobjectfifo<memref<2048xi32>>
+        %bd_id = amdaie.bd_id(%tile_0, %c0)
+        // Five dimensions whose strides do not linearize, so none can be folded
+        // away; npu1_4col's shim has three `intra` dimensions.
+        // expected-error @below {{has an access pattern of 5 dimensions after folding, which exceeds the 3 `intra` addressing dimensions of the target's DMA}}
+        // expected-error @below {{failed to legalize operation 'amdaie.npu.half_dma_cpy_nd'}}
+        %6 = amdaie.npu.half_dma_cpy_nd async %4(%5[0, 0, 0, 0, 0] [2, 3, 5, 7, 2] [512, 128, 17, 3, 1] bd_id = %bd_id channel = %channel) : !amdaie.logicalobjectfifo<memref<2048xi32>>
+        amdaie.npu.dma_wait(%6 : !amdaie.async_token)
+        amdaie.end
+      }
+    }
+    return
+  }
+}

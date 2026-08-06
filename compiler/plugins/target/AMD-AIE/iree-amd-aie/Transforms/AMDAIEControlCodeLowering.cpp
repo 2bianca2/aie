@@ -190,13 +190,19 @@ struct HalfDmaCpyNdToNpuConverter final
       }
     }
     // Make sure sizes/strides have the correct size based on the number from
-    // intra addressing dimensions.
-    assert(staticSizes.size() <= numIntraAddrDim &&
-           "The number of dimensions in DMA sizes should not more than the "
-           "number of `intra` addressing dimensions");
-    assert(staticStrides.size() <= numIntraAddrDim &&
-           "The number of dimensions in DMA strides should not more than the "
-           "number of `intra` addressing dimensions");
+    // intra addressing dimensions. This has to be a diagnostic rather than an
+    // assert: `numIntraAddrDim` is a `uint8_t` and `size()` is a `size_t`, so
+    // in a build with NDEBUG the subtraction below underflows and the insert
+    // count becomes astronomical. Failing to fold an access pattern within the
+    // BD's dimension budget is a real (if currently unreachable) outcome, so it
+    // has to be reported, not undefined.
+    if (staticSizes.size() > numIntraAddrDim ||
+        staticStrides.size() > numIntraAddrDim) {
+      return op.emitOpError()
+             << "has an access pattern of " << staticSizes.size()
+             << " dimensions after folding, which exceeds the " << +numIntraAddrDim
+             << " `intra` addressing dimensions of the target's DMA";
+    }
     staticSizes.insert(staticSizes.begin(),
                        numIntraAddrDim - staticSizes.size(), 0);
     staticStrides.insert(staticStrides.begin(),
