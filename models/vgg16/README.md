@@ -71,10 +71,10 @@ Measured on npu4: compile ~130 s, run ~75 s, output `[1,1000]` correlates
 | `--iree-amdaie-target-device=npu4` | Strix. Phoenix would be `npu1_4col`. |
 | `--iree-amd-aie-peano-install-dir` | `PEANO_INSTALL_DIR` alone is not read by `iree-compile`. |
 | `--iree-global-opt-use-im2col-for-convs` | The only conv path that reaches the NPU: convs are lowered to matmuls. Standard NCHW conv codegen is not supported. |
-| `--iree-amdaie-demote-contraction-inputs-to-bf16` | npu4 has no f32 vector path. f32 conv aborts and f32 matmul only runs scalar; demoting inputs (accumulation stays f32) makes them run as bf16. |
+| `--iree-amdaie-demote-contraction-inputs-to-bf16` | npu4 has no f32 vector path. f32 conv aborts and f32 matmul only runs scalar; demoting inputs (accumulation stays f32) makes them run as bf16. This is also the precondition for turning vectorization on later — npu4's matmul intrinsics are bf16 — so it stays even though today, paired with vectorization off, it only costs precision. |
 | `--iree-amdaie-enable-vectorization-passes=false` | aievec currently only handles i8 `vector.contract`; bf16 fails to vectorize, so the vectorization passes must be off. |
 | `--iree-preprocessing-pass-pipeline=...convert-conv-to-channels-last` | ONNX convs are NCHW; the im2col path expects NHWC. |
-| `--iree-dispatch-creation-no-fuse-into-contraction-conv-roots` | Keeps elementwise ops out of contraction dispatches so each dispatch stays a shape the NPU pipeline can tile. |
+| `--iree-dispatch-creation-no-fuse-into-contraction-conv-roots` | Works around a codegen gap: amd-aie cannot tile a contraction dispatch that has elementwise ops fused into it, so fusion across contraction/conv group boundaries is switched off. The real fix is on the codegen side, not here. |
 | `--iree-global-opt-detach-elementwise-through-reshape` | Detaches the bias add from the conv init through the im2col reshape, so the contraction dispatch has a plain `linalg.fill` init. |
 | `--iree-flow-enable-executable-deduplication=false` | Deduplicating two convs that differ only in constant-weight offset turns that offset into a runtime push constant, which `amdaie.npu.address_patch` cannot carry (it is static-only). The N-split pass also relies on its clones not being merged. |
 
@@ -84,6 +84,16 @@ not exist in upstream IREE.
 ## 5. Known limitations
 
 - Batch size is fixed at 1 by the ONNX file; other batch sizes are untested.
-- The flag list is not a stable interface. Several entries exist only to work
-  around gaps (aievec bf16, static-only address patch) and should disappear as
-  those are fixed — do not treat them as the intended user experience.
+- The flag list is not a stable interface, and passing it by hand is a stopgap.
+  Three of the flags exist only in the `ace-knu/iree` fork, so nothing in
+  `--help` or in upstream documentation leads a reader to this combination —
+  this file is the only place it is written down. Two more work around current
+  gaps (aievec has no bf16 path; `no-fuse` above) and should disappear as those
+  are fixed.
+- Omitting a flag does not produce a diagnostic naming it; the failure is a
+  compile crash deep in the pipeline or an `ert state 6` at runtime. Follow the
+  recipe exactly rather than bisecting it.
+- The flags encode facts about npu4, not user preferences. A second NPU target
+  would need its own combination, and this document would have to fork with it.
+  Moving these decisions behind a per-target capability query is tracked as
+  future work, not done here.

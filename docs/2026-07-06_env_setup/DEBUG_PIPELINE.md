@@ -19,8 +19,8 @@
 ./scripts/docker/run-debug.sh \
   --model models/mlp_2layer/mlp_2layer.onnx \
   --function mlp_2layer \
-  --input x.npy --input w1.npy --input w2.npy \   # 순서 = func arg 순서, .npy만
-  --expected expected.npy \                        # (선택) numpy 비교 대상
+  --input x.npy \                                  # 순서 = func arg 순서, .npy만
+  --expected expected.npy \                        # (선택) 비교 대상
   --pass iree-amdaie-lower-to-aie \                # (선택) 특정 pass before/after 추출
   --label run1
 ```
@@ -30,6 +30,12 @@
 
 주요 옵션:
 - `--target-device` : `npu4`(Strix, 기본) / `npu1_4col`(Phoenix)
+- `--device-flag` : iree-compile의 디바이스 선언 플래그(반복 가능). **주면 기본값
+  `--iree-hal-target-backends=amd-aie`를 대체한다.** CPU+NPU hetero 컴파일을 디버깅할 때 쓴다.
+- `--compile-flag` : iree-compile에 그대로 덧붙일 플래그(반복 가능). conv 모델에 필요한
+  demote/im2col 계열을 여기로 넘긴다 (조합은 `models/vgg16/README.md` 참고).
+- `--run-device` : iree-run-module의 `--device`(반복 가능, 기본 `amdxdna`). hetero vmfb는
+  `amdxdna`와 `local-task` 둘 다 필요하다.
 - `--stack-size` : 기본 2048 ('insufficient stack' 시 증대)
 - `--num-outputs` : 결과 텐서 개수(기본 1)
 - `--rtol/--atol` : 비교 허용오차(기본 1e-3)
@@ -54,17 +60,42 @@ python3 scripts/debug/pipeline_dump.py --model … --function … --input …
 import numpy as np
 d = "/workspace/debug_out/_inputs"; import os; os.makedirs(d, exist_ok=True)
 rng = np.random.default_rng(0)
-x  = rng.standard_normal((128,128)).astype(np.float32); np.save(f"{d}/x.npy",  x)
-w1 = rng.standard_normal((128,128)).astype(np.float32); np.save(f"{d}/w1.npy", w1)
-w2 = rng.standard_normal((128,128)).astype(np.float32); np.save(f"{d}/w2.npy", w2)
-np.save(f"{d}/expected.npy", (np.maximum(x@w1,0)@w2).astype(np.float32))  # (선택) 비교용
+x = rng.standard_normal((128,128)).astype(np.float32); np.save(f"{d}/x.npy", x)
+```
+`mlp_2layer`는 가중치가 모델에 상수로 구워져 있어 **런타임 입력이 `x` 하나뿐이다**
+(`models/mlp_2layer/export_mlp_2layer.py` 참고). 따라서 `--expected`를 numpy로 직접 계산할 수 없고,
+같은 모델을 CPU로 컴파일해 얻는다:
+```bash
+# (컨테이너 안) golden = 동일 모델의 llvm-cpu 실행 결과
+/workspace/build/tools/iree-compile models/mlp_2layer/mlp_2layer.mlir \
+  --iree-hal-target-backends=llvm-cpu -o /tmp/mlp_cpu.vmfb
+/workspace/build/tools/iree-run-module --device=local-task --module=/tmp/mlp_cpu.vmfb \
+  --function=mlp_2layer --input=@debug_out/_inputs/x.npy \
+  --output=@debug_out/_inputs/expected.npy
 ```
 ```bash
 # 위에서 만든 파일들을 상대경로로 전달
 ./scripts/docker/run-debug.sh --model models/mlp_2layer/mlp_2layer.onnx --function mlp_2layer \
-  --input debug_out/_inputs/x.npy --input debug_out/_inputs/w1.npy --input debug_out/_inputs/w2.npy \
+  --input debug_out/_inputs/x.npy \
   --expected debug_out/_inputs/expected.npy --label run1
 ```
+
+### hetero(CPU+NPU) 컴파일 디버깅
+기본값은 NPU 단일 디바이스라 pooling·layout op가 섞인 모델은 이 형태로 넘긴다:
+```bash
+./scripts/docker/run-debug.sh --model models/mlp_2layer/mlp_2layer.onnx --function mlp_2layer \
+  --input debug_out/_inputs/x.npy --expected debug_out/_inputs/expected.npy \
+  --device-flag=--iree-hal-target-device=npu=amdxdna \
+  --device-flag=--iree-hal-target-device=cpu=local \
+  --device-flag=--iree-hal-local-target-device-backends=llvm-cpu \
+  --device-flag=--iree-hal-default-device=npu \
+  --compile-flag=--iree-amdaie-demote-contraction-inputs-to-bf16 \
+  --compile-flag=--iree-amdaie-enable-vectorization-passes=false \
+  --run-device amdxdna --run-device local-task \
+  --rtol 5e-2 --atol 5e-2 --label hetero
+```
+허용오차를 푼 이유: golden은 CPU f32인데 위 컴파일은 입력을 bf16으로 demote한다. 기본값(1e-3)이면
+정상 실행도 `FAIL`로 보고된다 — 수치 차이지 버그가 아니다.
 
 ## 산출물 레이아웃 (`debug_out/<model>_<label>/`)
 

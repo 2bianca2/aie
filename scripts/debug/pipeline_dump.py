@@ -53,6 +53,12 @@ VALID_PHASES = [
     "vm",
 ]
 
+# Device selection passed to iree-compile when --device-flag is not given. A
+# single amd-aie device is enough for a matmul-only model; a heterogeneous
+# CPU+NPU model (anything with pooling, or a conv lowered through im2col) needs
+# both devices declared, which is what --device-flag replaces this with.
+DEFAULT_DEVICE_FLAGS = ["--iree-hal-target-backends=amd-aie"]
+
 
 def tool_path(env_name, default):
     return os.environ.get(env_name, default)
@@ -165,6 +171,16 @@ def main():
     ap.add_argument("--atol", type=float, default=1e-3)
     ap.add_argument("--num-outputs", type=int, default=1, help="number of result tensors")
     ap.add_argument("--target-device", default="npu4", help="npu4 (Strix) | npu1_4col (Phoenix)")
+    ap.add_argument("--device-flag", action="append", default=[], dest="device_flags",
+                    help="device selection flag for iree-compile, repeatable. If "
+                         "given at all, REPLACES the default (%s). Use to debug a "
+                         "heterogeneous CPU+NPU compile." % " ".join(DEFAULT_DEVICE_FLAGS))
+    ap.add_argument("--compile-flag", action="append", default=[], dest="compile_flags",
+                    help="extra flag appended to every iree-compile invocation, "
+                         "repeatable (e.g. the demote/im2col flags a conv model needs)")
+    ap.add_argument("--run-device", action="append", default=[], dest="run_devices",
+                    help="--device for iree-run-module, repeatable; default amdxdna. "
+                         "A heterogeneous vmfb needs amdxdna and local-task both")
     ap.add_argument("--stack-size", type=int, default=2048)
     ap.add_argument("--elide", type=int, default=64,
                     help="--mlir-elide-elementsattrs-if-larger for readable dumps")
@@ -200,11 +216,13 @@ def main():
     run_dir = Path(args.outdir).resolve() / f"{model.stem}_{args.label}"
 
     common = [
-        "--iree-hal-target-backends=amd-aie",
+        *(args.device_flags or DEFAULT_DEVICE_FLAGS),
         f"--iree-amdaie-target-device={args.target_device}",
         f"--iree-amd-aie-peano-install-dir={args.peano}",
         f"--iree-amdaie-stack-size={args.stack_size}",
         f"--mlir-elide-elementsattrs-if-larger={args.elide}",
+        # Last, so a repeated flag here wins over the defaults above.
+        *args.compile_flags,
     ]
 
     # Resume mode: re-run only a segment from a prior baseline dump (IR-only).
@@ -267,8 +285,9 @@ def main():
 
     # 4. run on NPU
     out_paths = [run_dir / "run" / f"out{k}.npy" for k in range(args.num_outputs)]
-    run_cmd = [args.iree_run_module, "--device=amdxdna", f"--module={vmfb}",
-               f"--function={args.function}"]
+    run_cmd = [args.iree_run_module]
+    run_cmd += [f"--device={d}" for d in (args.run_devices or ["amdxdna"])]
+    run_cmd += [f"--module={vmfb}", f"--function={args.function}"]
     for p in in_paths:
         run_cmd.append(f"--input=@{p}")          # NO shape prefix (npy header read)
     for p in out_paths:
