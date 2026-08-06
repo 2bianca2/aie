@@ -206,6 +206,7 @@ static FailureOr<int64_t> recoverSubspanElementOffset(Value source) {
 static LogicalResult reinterpretSourceWithBaseOffset(IRRewriter &rewriter,
                                                      Value source,
                                                      ArrayRef<int64_t> strides,
+                                                     int64_t baseOffset,
                                                      Operation *&rebasedOp) {
   if (llvm::any_of(strides,
                    [](int64_t s) { return ShapedType::isDynamic(s); })) {
@@ -213,6 +214,13 @@ static LogicalResult reinterpretSourceWithBaseOffset(IRRewriter &rewriter,
   }
   FailureOr<int64_t> maybeOffset = recoverSubspanElementOffset(source);
   if (failed(maybeOffset)) return failure();
+  // The recovered offset must account for the whole base offset. When the type
+  // pins it statically, anything else means the walk crossed a view that also
+  // contributes an offset (which `recoverSubspanElementOffset` drops), so the
+  // reinterpret would silently address the wrong data. Bail to the caller's
+  // diagnostic instead.
+  if (!ShapedType::isDynamic(baseOffset) && *maybeOffset != baseOffset)
+    return failure();
   MLIRContext *ctx = source.getContext();
   Location loc = source.getLoc();
   ArrayRef<int64_t> srcShape = cast<MemRefType>(source.getType()).getShape();
@@ -256,7 +264,7 @@ LogicalResult setDmaInputs(IRRewriter &rewriter, Operation *&operandOp,
       Value source = operandOp->getResult(0);
       Operation *rebasedOp = nullptr;
       if (failed(reinterpretSourceWithBaseOffset(rewriter, source, stridesI64,
-                                                 rebasedOp))) {
+                                                 baseOffset, rebasedOp))) {
         return operandOp->emitOpError(llvm::formatv(
             "has a non-zero base offset {0} that could not be recovered from a "
             "backing subspan; not supported by this pass.",
@@ -300,8 +308,10 @@ LogicalResult setDmaInputs(IRRewriter &rewriter, Operation *&operandOp,
     // offset is handled.
     if (baseOffset != 0) {
       Operation *rebasedOp = nullptr;
-      if (failed(reinterpretSourceWithBaseOffset(
-              rewriter, subviewOp.getSource(), stridesI64, rebasedOp))) {
+      if (failed(reinterpretSourceWithBaseOffset(rewriter,
+                                                 subviewOp.getSource(),
+                                                 stridesI64, baseOffset,
+                                                 rebasedOp))) {
         return subviewOp->emitOpError(
             "has a non-zero base offset that could not be recovered from a "
             "backing subspan; not supported by this pass.");

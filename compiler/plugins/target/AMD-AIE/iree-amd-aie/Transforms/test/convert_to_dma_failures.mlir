@@ -1,4 +1,4 @@
-// RUN: iree-opt %s --iree-amdaie-convert-to-dma -verify-diagnostics
+// RUN: iree-opt %s --iree-amdaie-convert-to-dma --split-input-file -verify-diagnostics
 
 #map = affine_map<()[s0] -> (s0 * 8)>
 
@@ -28,5 +28,25 @@ func.func @failure_case() {
 
     scf.reduce
   }
+  return
+}
+
+// -----
+
+// The base offset carried by the memref type must be fully accounted for by the
+// backing subspan's `byte_offset`. Here it is not: the subspan is at offset 0
+// and the 512-element offset comes from an intervening `memref.subview`, whose
+// contribution the recovery walk drops. Rebasing on the recovered (zero) offset
+// would silently address the wrong data, so the pass must reject instead.
+
+#pipeline_layout = #hal.pipeline.layout<bindings = [#hal.pipeline.binding<storage_buffer, "ReadOnly|Indirect">]>
+func.func @unrecoverable_base_offset() {
+  %c0 = arith.constant 0 : index
+  %0 = hal.interface.binding.subspan layout(#pipeline_layout) binding(0) alignment(64) offset(%c0) flags("ReadOnly|Indirect") : memref<64x8x8xf32>
+  %sv = memref.subview %0[8, 0, 0] [32, 8, 8] [1, 1, 1] : memref<64x8x8xf32> to memref<32x8x8xf32, strided<[64, 8, 1], offset: 512>>
+  // expected-error@below {{'memref.assume_alignment' op has a non-zero base offset 512 that could not be recovered from a backing subspan; not supported by this pass.}}
+  %aa = memref.assume_alignment %sv, 64 : memref<32x8x8xf32, strided<[64, 8, 1], offset: 512>>
+  %dst = memref.alloc() : memref<32x8x1x8xf32, 1>
+  linalg.pack %aa inner_dims_pos = [2] inner_tiles = [8] into %dst : memref<32x8x8xf32, strided<[64, 8, 1], offset: 512>> -> memref<32x8x1x8xf32, 1>
   return
 }
