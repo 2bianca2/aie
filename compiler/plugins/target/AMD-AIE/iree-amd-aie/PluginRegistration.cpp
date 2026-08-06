@@ -79,6 +79,12 @@ struct AMDAIESession
     // target's pack-peel tile multiples so divisibility holds inside the
     // dispatch. No-op for dispatches already divisible / not on amd-aie.
     passManager.addPass(AMDAIE::createAMDAIEPadContractionDispatchesPass());
+    // Split large-(K,N) transpose_b NPU matmul dispatches (padded above) into
+    // N-chunk sub-dispatches so each weight's L3->L2 shim DMA stays within the
+    // shim addressing limits (a single large-N weight DMA degrades and stalls).
+    // No-op for conv / small matmuls / non-amd-aie dispatches.
+    passManager.addPass(
+        AMDAIE::createAMDAIESplitLargeContractionDispatchesPass());
   }
 
   void populateHALTargetDevices(IREE::HAL::TargetDeviceList &targets) override {
