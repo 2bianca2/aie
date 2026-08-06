@@ -119,3 +119,17 @@ artifacts/
 
 # pipeline_dump.py debug artifacts (scripts/debug), regenerated per run
 /debug_out/
+
+# Local scratch: throwaway experiment scripts and pipeline dumps. These grow to
+# tens of GB, so keep them out of `git add -A` range.
+/_local/
+/scripts/debug/_*.sh
+/scripts/debug/__pycache__/
+
+# Model working dirs. Large model files are downloaded (see each model's
+# README) and .mlir/.vmfb/.npy are regenerated per run; neither is committed.
+# Small committed inputs (e.g. models/mlp_2layer/mlp_2layer.onnx) are unaffected.
+/models/*/*.mlir
+/models/*/*.vmfb
+/models/*/*.npy
+/models/vgg16/*.onnx

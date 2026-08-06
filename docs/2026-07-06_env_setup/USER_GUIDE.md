@@ -75,7 +75,7 @@ bash build_tools/download_peano.sh          # Peano(llvm-aie) v19 → ./llvm-aie
 ./scripts/build/configure.sh      # cmake configure (frontend 전부 ON, assertions ON, python bindings ON)
 ./scripts/build/build.sh          # 빌드 (-j는 코어와 RAM에 맞춰 자동 축소, RAM 부족 먹통 방지. config.sh에서 조절 가능)
 ctest --test-dir build -R amd-aie --output-on-failure
-# 기대: 100% tests passed, 0 failed out of 214
+# 기대: 100% tests passed, 0 failed out of 217
 ```
 
 ### 2-4. 모델 → NPU 실행 (컨테이너 내부)
@@ -103,7 +103,7 @@ build/tools/iree-compile --iree-hal-target-backends=amd-aie --iree-amdaie-target
 
 # NPU에서 실행
 build/tools/iree-run-module --device=amdxdna --module=model.vmfb \
-  --function=main --input="1x3x224x224xf32=1"
+  --function=main --input="128x128xf32=1"
 ```
 참고:
 - iree-amdaie-target-device는 NPU 세대에 맞춘다 (Phoenix=npu1_4col, Strix=npu4).
@@ -133,8 +133,17 @@ build/tools/iree-run-module --device=amdxdna --module=model.vmfb \
 >   --module=mlp_2layer.vmfb --function=mlp_2layer --input="128x128xf32=1" --output=@out.npy
 > ```
 >
-> 생성 스크립트: `models/mlp_2layer/export_mlp_2layer.py`. 정확도까지 확인하려면 같은 모델을 CPU로도
-> 컴파일(`--iree-hal-target-backends=llvm-cpu`)해 golden과 비교한다 (`scripts/debug/_verify_real_mlp.sh`).
+> 생성 스크립트: `models/mlp_2layer/export_mlp_2layer.py`. 정확도까지 확인하려면 같은 모델을 CPU로
+> 컴파일해 golden을 만들고 비교한다:
+>
+> ```bash
+> /workspace/build/tools/iree-compile mlp_2layer.mlir \
+>   --iree-hal-target-backends=llvm-cpu -o mlp_cpu.vmfb
+> /workspace/build/tools/iree-run-module --device=local-task --module=mlp_cpu.vmfb \
+>   --function=mlp_2layer --input="128x128xf32=1" --output=@gold.npy
+> python3 -c "import numpy as np; g=np.load('gold.npy'); o=np.load('out.npy'); \
+>   print('corr %.6f' % np.corrcoef(g.ravel(), o.ravel())[0,1])"
+> ```
 >
 > 컴파일 각 단계의 MLIR을 덤프해 변환 과정을 추적하려면 `./scripts/docker/run-debug.sh`
 > (도구 `scripts/debug/pipeline_dump.py`) — 상세는 [`DEBUG_PIPELINE.md`](DEBUG_PIPELINE.md).
