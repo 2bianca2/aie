@@ -41,7 +41,7 @@ amd-aie 백엔드에서 여러 device(가속기 + host CPU)에 dispatch를 나�
 | 상황 | 필요한 작업 |
 |---|---|
 | **같은 backend의 새 device** (예: npu4 외 다른 amd-aie 타겟) | 테이블 수정 불필요 — 이미 amd-aie로 분류됨. 옵션으로 타겟하면 그대로 동작. |
-| **새 accelerator backend** (예: 다른 종류 NPU) | `deviceRole`에 role 추가 + `linkFlags`에 쌍 추가. **단, 그 backend의 실제 codegen 지원이 있어야 함** — 이 플러그인은 amd-aie만 codegen하므로, codegen 없는 backend에 contraction을 배정하면 downstream 실패. |
+| **새 accelerator backend** (예: 다른 종류 NPU) | `deviceRole`에 role 추가 + `linkFlags`에 쌍 추가. **단, 테이블 수정만으로는 부족하다** — (1) 분류 술어(`executableIsContractionOrConv`)가 모든 accelerator에 공유되는 하나라 op 커버리지가 다른 두 accelerator를 구분할 수 없고, (2) affinity를 무조건 덮어쓰므로 두 번째 accelerator 플러그인이 자기 placement 패스를 등록하면 서로 덮어쓴다. 그리고 그 backend의 실제 codegen 지원이 있어야 한다 — codegen 없는 backend에 contraction을 배정하면 downstream 실패. 상세는 `AMDAIEAssignDeviceAffinities.cpp`의 테이블 주석 참고. |
 | **다중 동종 device 실제 분배** (예: NPU 2개를 나눠 씀) | 테이블만으론 부족 — **정책 seam(front) 교체 필요**(front는 첫 device만 사용). |
 
 ## 미래: 지원연산 + 성능 기반 배치 정책의 기반

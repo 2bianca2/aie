@@ -62,6 +62,10 @@ struct AMDAIEOptions {
   // vector path, so f32 conv aborts and f32 matmul only runs scalar; demoting
   // makes them run as bf16. Applied in preprocessing (before named ops are
   // generalized) because the upstream demote pass only matches named ops.
+  // Note this is module-wide and runs before device placement, so in a
+  // heterogeneous compile a contraction that ends up on the host is demoted
+  // too. Harmless while every contraction is placed on the accelerator; revisit
+  // if the placement rules change.
   bool demoteContractionInputsToBf16{false};
   bool enableCoalescingLoops{false};
   bool enableCollapsingUnitDims{false};

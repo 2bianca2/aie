@@ -628,6 +628,27 @@ void AMDAIESplitLargeContractionDispatchesPass::runOnOperation() {
   // Empirical trigger: the cliff is combinatorial, so split only large FC
   // weights (large reduction K and large output N) and leave conv / small
   // matmuls untouched.
+  //
+  // These two numbers were found by experiment, not derived, and that has three
+  // consequences worth knowing before reusing them:
+  //
+  //  - They were validated for bf16 on VGG-16 (dense0 K=8192 N=4096, dense1
+  //    N=1024) on npu4. No other element type or device was measured.
+  //  - kKThreshold is compared in ELEMENTS, while the shim limit it stands in
+  //    for is a limit on words. An f32 weight at K=2048 has the same byte
+  //    footprint as the bf16 K=4096 case that set this number, but does not
+  //    trigger the split.
+  //  - Getting it wrong does not produce wrong numbers. The weight DMA degrades
+  //    into a serial BD chain and stalls, so the symptom is a runtime timeout
+  //    (ert state 6), which is easy to misattribute.
+  //
+  // The principled replacement is available today and should be preferred when
+  // this is revisited: DmaDimConfig (Utils/AMDAIEDmaUtils.h) exposes the real
+  // per-device limits (nbIntraDims from AMDAIEDmaProp::NumAddrDim, getMaxSizes,
+  // getMaxStrides), so the trigger can ask "does this weight's L3->L2 access
+  // pattern still fold within maxNbDims?" in bytes, for whatever device and
+  // element type the dispatch actually targets -- `target` is already resolved
+  // per dispatch below.
   constexpr int64_t kKThreshold = 4096;  // split only when reduction K exceeds this
   constexpr int64_t kNChunkMax = 512;    // max N per chunk (validated good chunk)
 

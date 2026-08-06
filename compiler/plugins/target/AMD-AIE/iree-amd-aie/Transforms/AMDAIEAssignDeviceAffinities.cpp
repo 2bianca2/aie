@@ -55,6 +55,21 @@ static StringRef getDeviceBackend(IREE::Util::GlobalOpInterface global) {
 // Maps a device backend to its role and a backend pair to its topology link
 // capability. Both the classification and the topology seams read this table;
 // supporting new hardware means adding entries here (and nothing else).
+//
+// Adding an entry is necessary but not sufficient to support a second
+// accelerator backend, for two reasons:
+//
+//  - Classification is a single shared predicate.
+//    `executableIsContractionOrConv` below answers "does an accelerator want
+//    this?", not "does *this* accelerator support it". Two accelerators with
+//    different op coverage cannot be told apart by editing the table alone.
+//  - Placement is unconditional. The walk in `runOnOperation` sets
+//    `stream.affinity` on every dispatch without checking for an existing one.
+//    `PluginManager` fans the pipeline hooks out to every initialized session,
+//    so if a second accelerator plugin registers its own placement pass, the
+//    two passes overwrite each other and whichever runs last wins. Skipping
+//    dispatches that already carry an affinity is the minimum needed before
+//    that configuration can work.
 //===----------------------------------------------------------------------===//
 
 enum class DeviceRole { Host, Accelerator, Unknown };
