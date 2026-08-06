@@ -19,8 +19,8 @@
 // CHECK: flow.dispatch @{{.*}}_dispatch_1::@{{.*}}transpose
 // CHECK-SAME: {stream.affinity = #hal.device.affinity<@cpu>}
 
-func.func @matmul_and_transpose(%a: tensor<64x64xf32>, %b: tensor<64x64xf32>,
-                                %c: tensor<64x64xf32>)
+func.func @two_roots(%a: tensor<64x64xf32>, %b: tensor<64x64xf32>,
+                     %c: tensor<64x64xf32>)
     -> (tensor<64x64xf32>, tensor<64x64xf32>) {
   %cst = arith.constant 0.0 : f32
   %empty = tensor.empty() : tensor<64x64xf32>

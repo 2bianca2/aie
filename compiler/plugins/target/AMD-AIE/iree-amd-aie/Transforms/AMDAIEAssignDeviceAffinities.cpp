@@ -10,9 +10,11 @@
 // an accelerator device and runs everything else (layout transposes, f32->bf16
 // casts introduced by demotion, other elementwise leftovers) on a host device.
 // Devices are declared via `--iree-hal-target-device` (util.global with a
-// DeviceTargetAttr); a single device-capability table (below) maps each backend
-// to a role (Host/Accelerator) and each backend pair to its topology link
-// capability -- the two seams (classification and topology) both read it.
+// DeviceTargetAttr); a single device-capability table, in
+// Transforms/Utils/AMDAIEDevicePlacementUtils.{h,cpp}, maps each backend to a
+// role (Host/Accelerator) and each backend pair to its topology link capability
+// -- the two seams here (classification and topology) both read it, as does
+// AMDAIEPadContractionDispatches when it needs a host to place work on.
 //
 // Run at the end of the Flow phase (after dispatch outlining, before the Stream
 // affinity solver), it pins each `flow.dispatch` via `stream.affinity`

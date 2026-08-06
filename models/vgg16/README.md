@@ -57,6 +57,18 @@ build/tools/iree-run-module --device=amdxdna --device=local-task \
   --input=@input.npy --output=@out.npy
 ```
 
+The run needs an `input.npy` holding one `[1,3,224,224]` float32 image. Any
+input works for checking the pipeline; a fixed random one keeps the numbers
+reproducible:
+
+```bash
+python3 -c "import numpy as np; np.random.seed(1); \
+  np.save('input.npy', (np.random.randn(1,3,224,224)*0.2).astype(np.float32))"
+```
+
+Pass a real preprocessed image instead when you care about the predicted class
+rather than about the compiler.
+
 The entry function name comes from the ONNX graph name; read it back with
 `grep -oE "func.func @[A-Za-z0-9_]+" /tmp/vgg.mlir | head -1`.
 

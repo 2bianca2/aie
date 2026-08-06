@@ -20,7 +20,7 @@ amd-aie 백엔드에서 여러 device(가속기 + host CPU)에 dispatch를 나�
 | 조회 | 현재 값 |
 |---|---|
 | `deviceRole(backend)` → Host / Accelerator / Unknown | `llvm-cpu`=Host, `amd-aie`=Accelerator, 그 외=Unknown(무시) |
-| `linkFlags(srcBackend, dstBackend)` → `{unified_memory, transparent_access}` | `amd-aie↔llvm-cpu`=`transparent_access:true`(통합 APU, 검증됨), 그 외 쌍=둘 다 `false`(보수적 staging) |
+| `linkFlags(srcBackend, dstBackend)` → `{unified_memory, transparent_access}` | `llvm-cpu→amd-aie`=`transparent_access:true`(CPU가 amdxdna BO를 host-map), **역방향 `amd-aie→llvm-cpu`는 `false`**(CPU 할당은 BO가 아니라 NPU가 바인딩 불가 — `import_buffer` 미구현), 그 외 쌍=둘 다 `false`(보수적 staging) |
 
 > `transparent_access`는 장치쌍·방향에 따라 다른 하드웨어 속성이라(IREE `HALAttrs.td`의 예시가 쌍마다 다름) **무조건 true는
 > 일반적으로 틀리다.** IREE는 topology를 자동 유도하지 않고 소비만 하므로(`ResolveTopologyQueries`/`ElideAsyncCopies`),
@@ -81,7 +81,9 @@ device-capability 테이블 (device 당)
 
 ## 참고
 
-- 패스·테이블: `Transforms/AMDAIEAssignDeviceAffinities.cpp` (`deviceRole`/`linkFlags`, `runOnOperation`).
+- 테이블: `Transforms/Utils/AMDAIEDevicePlacementUtils.{h,cpp}` (`deviceRole`/`linkFlags`/`getFirstDeviceWithRole`).
+- 패스: `Transforms/AMDAIEAssignDeviceAffinities.cpp` (`runOnOperation`). 테이블을 읽는 다른 소비자는
+  `Transforms/AMDAIEPadContractionDispatches.cpp`의 `getHostAffinity`.
 - 훅: `PluginRegistration.cpp` (`extendPreprocessingPassPipeline`/`extendFlowTransformPassPipeline`).
 - HAL topology attr: IREE `compiler/src/iree/compiler/Dialect/HAL/IR/HALAttrs.td` (`DeviceTopologyAttr`/`DeviceLinkAttr`),
   소비처 `Dialect/HAL/Transforms/ResolveTopologyQueries.cpp`, `Dialect/Stream/Transforms/ElideAsyncCopies.cpp`.

@@ -624,8 +624,10 @@ void AMDAIESplitLargeContractionDispatchesPass::runOnOperation() {
   // These two numbers were found by experiment, not derived, and that has three
   // consequences worth knowing before reusing them:
   //
-  //  - They were validated for bf16 on VGG-16 (dense0 K=8192 N=4096, dense1
-  //    N=1024) on npu4. No other element type or device was measured.
+  //  - They were validated on exactly one dispatch: VGG-16's dense0
+  //    (K=25088, N=4096) in bf16 on npu4. Its other two fully connected layers
+  //    (K=4096, N=4096 and K=4096, N=1000) both have K == kKThreshold and so do
+  //    not split at all. No other element type or device was measured.
   //  - kKThreshold is compared in ELEMENTS, while the shim limit it stands in
   //    for is a limit on words. An f32 weight at K=2048 has the same byte
   //    footprint as the bf16 K=4096 case that set this number, but does not

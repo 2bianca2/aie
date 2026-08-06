@@ -66,8 +66,11 @@ x = rng.standard_normal((128,128)).astype(np.float32); np.save(f"{d}/x.npy", x)
 (`models/mlp_2layer/export_mlp_2layer.py` 참고). 따라서 `--expected`를 numpy로 직접 계산할 수 없고,
 같은 모델을 CPU로 컴파일해 얻는다:
 ```bash
-# (컨테이너 안) golden = 동일 모델의 llvm-cpu 실행 결과
-/workspace/build/tools/iree-compile models/mlp_2layer/mlp_2layer.mlir \
+# (컨테이너 안) golden = 동일 모델의 llvm-cpu 실행 결과.
+# .mlir은 생성물이라 repo에 없다 — 먼저 import한다.
+python3 -m iree.compiler.tools.import_onnx models/mlp_2layer/mlp_2layer.onnx \
+  -o /tmp/mlp_2layer.mlir
+/workspace/build/tools/iree-compile /tmp/mlp_2layer.mlir \
   --iree-hal-target-backends=llvm-cpu -o /tmp/mlp_cpu.vmfb
 /workspace/build/tools/iree-run-module --device=local-task --module=/tmp/mlp_cpu.vmfb \
   --function=mlp_2layer --input=@debug_out/_inputs/x.npy \

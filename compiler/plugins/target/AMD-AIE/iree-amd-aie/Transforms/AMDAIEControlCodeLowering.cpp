@@ -200,7 +200,8 @@ struct HalfDmaCpyNdToNpuConverter final
         staticStrides.size() > numIntraAddrDim) {
       return op.emitOpError()
              << "has an access pattern of " << staticSizes.size()
-             << " dimensions after folding, which exceeds the " << +numIntraAddrDim
+             << " dimensions after folding, which exceeds the "
+             << +numIntraAddrDim
              << " `intra` addressing dimensions of the target's DMA";
     }
     staticSizes.insert(staticSizes.begin(),

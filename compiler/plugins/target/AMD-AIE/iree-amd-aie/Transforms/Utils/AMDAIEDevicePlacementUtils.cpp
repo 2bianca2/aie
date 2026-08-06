@@ -39,6 +39,13 @@ LinkCapability linkFlags(StringRef srcBackend, StringRef dstBackend) {
   //
   // Declaring both directions true (as this did originally) says the NPU can
   // read CPU-allocated memory, which is the case that does not work.
+  //
+  // This is read directionally by more than the topology resolver:
+  // Stream/Transforms/ElideAsyncCopies.cpp asks hasTransparentAccess(source,
+  // result) before dropping a transfer, so an NPU->CPU transfer that the
+  // symmetric declaration let it elide is now kept. That is the intended
+  // outcome -- the NPU's result has to be copied into a CPU allocation for a
+  // host dispatch to read it -- but it is a behavior change, not a no-op.
   if (srcBackend == "llvm-cpu" && dstBackend == "amd-aie")
     return {/*unifiedMemory=*/false, /*transparentAccess=*/true};
   return {};  // conservative default: stage (copy) across the boundary.
