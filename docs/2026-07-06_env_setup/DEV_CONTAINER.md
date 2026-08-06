@@ -143,9 +143,9 @@ cmake -B build -S third_party/iree -G Ninja \
 # 스크립트 build.sh는 이 -j를 min(6, nproc-2, RAM_GB/4)로 자동 계산한다.
 cmake --build build -j 6
 
-# 테스트. -j 없으면 순차(안전). 214개가 순차로도 수초라 -j 불필요.
+# 테스트. -j 없으면 순차(안전). 218개가 순차로도 수초라 -j 불필요.
 ctest --test-dir build -R amd-aie --output-on-failure
-# 기대: 100% tests passed, 0 failed out of 214
+# 기대: 100% tests passed, 0 failed out of 218
 # (IREE_ENABLE_ASSERTIONS=ON + PEANO_INSTALL_DIR 필수 — 하나라도 빠지면 일부 테스트 실패)
 ```
 

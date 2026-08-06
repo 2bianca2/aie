@@ -75,7 +75,7 @@ bash build_tools/download_peano.sh          # Peano(llvm-aie) v19 → ./llvm-aie
 ./scripts/build/configure.sh      # cmake configure (frontend 전부 ON, assertions ON, python bindings ON)
 ./scripts/build/build.sh          # 빌드 (-j는 코어와 RAM에 맞춰 자동 축소, RAM 부족 먹통 방지. config.sh에서 조절 가능)
 ctest --test-dir build -R amd-aie --output-on-failure
-# 기대: 100% tests passed, 0 failed out of 217
+# 기대: 100% tests passed, 0 failed out of 218
 ```
 
 ### 2-4. 모델 → NPU 실행 (컨테이너 내부)
