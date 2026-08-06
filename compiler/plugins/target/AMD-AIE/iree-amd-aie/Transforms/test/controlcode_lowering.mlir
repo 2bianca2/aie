@@ -578,3 +578,66 @@ module attributes {hal.executable.target = #executable_target_amdaie_pdi_fb} {
 // ADD2-LABEL:   @reconfigure
 // ADD2-COUNT-3:   amdaie.npu.address_patch {arg_idx = 2
 // ADD2-NOT:       amdaie.npu.address_patch
+
+// -----
+
+// A `memref.reinterpret_cast` under the DMA input carries the operand's static
+// base offset (AMDAIEConvertToDma keeps it out of the access pattern so the
+// pattern stays within the shim BD dimension limit). It must be recombined into
+// the BD base address, i.e. added to the access pattern's own offset and scaled
+// to bytes: (bufferOffset + reinterpretElemOffset) * elemWidthInBits / 8.
+// Here the reinterpret carries 512 i32 elements, so 512 * 4 = 2048 bytes.
+
+// CHECK-LABEL: @half_npu_dma_cpy_nd_reinterpret_base_offset
+#executable_target_amdaie_xclbin_fb = #hal.executable.target<"amd-aie", "amdaie-xclbin-fb", {target_device = "npu1_4col", ukernels = "none"}>
+#pipeline_layout = #hal.pipeline.layout<bindings = [#hal.pipeline.binding<storage_buffer, "ReadOnly|Indirect">], flags = Indirect>
+module attributes {hal.executable.target = #executable_target_amdaie_xclbin_fb} {
+  func.func @half_npu_dma_cpy_nd_reinterpret_base_offset() {
+    %c0 = arith.constant 0 : index
+    %c1 = arith.constant 1 : index
+    amdaie.workgroup {
+      %tile = amdaie.tile(%c0, %c1)
+      %tile_0 = amdaie.tile(%c0, %c0)
+      %buffer = amdaie.buffer(%tile) : memref<2048xi32, 1 : i32>
+      %buffer_1 = amdaie.buffer(%tile) : memref<2048xi32, 1 : i32>
+      %lock = amdaie.lock(%tile(4), 4)
+      %lock_2 = amdaie.lock(%tile(5), 0)
+      %0 = amdaie.logicalobjectfifo.from_buffers({%buffer, %buffer_1}, {%lock}, {%lock_2}) : memref<2048xi32, 1 : i32>, memref<2048xi32, 1 : i32> -> !amdaie.logicalobjectfifo<memref<2048xi32, 1 : i32>, 2>
+      %1 = hal.interface.binding.subspan layout(#pipeline_layout) binding(0) alignment(64) offset(%c0) flags("ReadOnly|Indirect") : memref<64x32xi32>
+      %2 = amdaie.logicalobjectfifo.placeholder{%tile_0} : !amdaie.logicalobjectfifo<memref<64x32xi32>>
+      %channel = amdaie.channel(%tile_0, 0, port_type = DMA, direction = MM2S)
+      %channel_3 = amdaie.channel(%tile, 0, port_type = DMA, direction = S2MM)
+      %3 = amdaie.flow({%channel} -> {%channel_3}) {is_packet_flow = true, packet_id = 0 : ui8}
+// CHECK: %[[CONNECTION:.+]] = amdaie.connection
+      %4 = amdaie.connection(%0 {%channel_3}, %2 {%channel}, flow = %3) {connection_type = #amdaie<connection_type Packet>} : (!amdaie.logicalobjectfifo<memref<2048xi32, 1 : i32>, 2>, !amdaie.logicalobjectfifo<memref<64x32xi32>>)
+      amdaie.controlcode {
+        %aa = memref.assume_alignment %1, 64 : memref<64x32xi32>
+        %rc = memref.reinterpret_cast %aa to offset: [512], sizes: [64, 32], strides: [32, 1] : memref<64x32xi32> to memref<64x32xi32, strided<[32, 1], offset: 512>>
+        %5 = amdaie.logicalobjectfifo.from_memref %rc, {%tile_0} : memref<64x32xi32, strided<[32, 1], offset: 512>> -> !amdaie.logicalobjectfifo<memref<2048xi32>>
+        %bd_id = amdaie.bd_id(%tile_0, %c0)
+// The access pattern is unchanged (offset stays out of it) ...
+// CHECK: amdaie.npu.write_bd(%[[CONNECTION]]) {bd_id = 0 : ui32, buffer_length = 2048 : ui32, buffer_offset = 0 : ui32,
+// CHECK-SAME: sizes = array<i32: 0, 0, 2048>, strides = array<i32: 0, 0, 1>
+// ... and the base offset lands in the address patch instead: 512 * 4 = 2048.
+// CHECK: amdaie.npu.address_patch {arg_idx = 0 : ui32, bd_id = 0 : ui32, col = 0 : ui32, offset = 2048 : ui32}
+        %6 = amdaie.npu.half_dma_cpy_nd async %4(%5[0] [2048] [1] bd_id = %bd_id channel = %channel) : !amdaie.logicalobjectfifo<memref<2048xi32>>
+        amdaie.npu.dma_wait(%6 : !amdaie.async_token)
+// A non-zero access-pattern offset is ADDED to the carried base offset, not
+// replaced by it: (256 + 512) * 4 = 3072.
+// CHECK: amdaie.npu.write_bd(%[[CONNECTION]]) {bd_id = 0 : ui32, buffer_length = 1024 : ui32, buffer_offset = 0 : ui32,
+// CHECK: amdaie.npu.address_patch {arg_idx = 0 : ui32, bd_id = 0 : ui32, col = 0 : ui32, offset = 3072 : ui32}
+        %7 = amdaie.npu.half_dma_cpy_nd async %4(%5[256] [1024] [1] bd_id = %bd_id channel = %channel) : !amdaie.logicalobjectfifo<memref<2048xi32>>
+        amdaie.npu.dma_wait(%7 : !amdaie.async_token)
+        amdaie.end
+      }
+    }
+    return
+  }
+}
+// ADD1-LABEL:   @half_npu_dma_cpy_nd_reinterpret_base_offset
+// ADD1-COUNT-2:   amdaie.npu.address_patch {arg_idx = 1
+// ADD1-NOT:       amdaie.npu.address_patch
+
+// ADD2-LABEL:   @half_npu_dma_cpy_nd_reinterpret_base_offset
+// ADD2-COUNT-2:   amdaie.npu.address_patch {arg_idx = 2
+// ADD2-NOT:       amdaie.npu.address_patch

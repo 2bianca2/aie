@@ -15,6 +15,7 @@ iree_lit_test_suite(
     "assign_buffer_address.mlir"
     "assign_channels.mlir"
     "assign_connection_types.mlir"
+    "assign_device_affinities.mlir"
     "assign_logical_objectfifo_depth.mlir"
     "assign_npu_dma_bd_ids.mlir"
     "assign_packet_ids.mlir"
