@@ -25,12 +25,21 @@ DeviceRole deviceRole(StringRef backend) {
 }
 
 LinkCapability linkFlags(StringRef srcBackend, StringRef dstBackend) {
-  // npu4 (amd-aie) and the CPU share system memory on the integrated APU, so
-  // either can access the other's buffers without staging (validated e2e).
-  bool amdAieCpuPair =
-      (srcBackend == "amd-aie" && dstBackend == "llvm-cpu") ||
-      (srcBackend == "llvm-cpu" && dstBackend == "amd-aie");
-  if (amdAieCpuPair)
+  // `transparent_access` on a link (src -> dst) means "src can access dst's
+  // memory without staging", so the two directions are asked separately and
+  // here they differ:
+  //
+  //  - llvm-cpu -> amd-aie is true. An amdxdna allocation is a BO that is
+  //    host-local and device-visible, so a CPU dispatch host-maps it directly.
+  //  - amd-aie -> llvm-cpu is false. An allocation from the CPU allocator is
+  //    not a BO, and the amdxdna allocator cannot wrap one (`import_buffer` is
+  //    unimplemented), so the NPU cannot bind it at all. This is exactly why a
+  //    buffer shared across the two devices has to be allocated on the
+  //    accelerator.
+  //
+  // Declaring both directions true (as this did originally) says the NPU can
+  // read CPU-allocated memory, which is the case that does not work.
+  if (srcBackend == "llvm-cpu" && dstBackend == "amd-aie")
     return {/*unifiedMemory=*/false, /*transparentAccess=*/true};
   return {};  // conservative default: stage (copy) across the boundary.
 }

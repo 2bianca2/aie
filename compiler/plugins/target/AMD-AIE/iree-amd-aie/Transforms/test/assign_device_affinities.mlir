@@ -3,9 +3,12 @@
 // Heterogeneous placement: a contraction/conv dispatch is pinned to the amd-aie
 // (NPU) device, everything else (here an elementwise dispatch) to the llvm-cpu
 // device, and the device topology is injected so cross-device buffers resolve.
+// The links are asymmetric: the CPU can host-map an amdxdna BO, but the NPU
+// cannot bind a CPU allocation (it is not a BO), so only cpu -> npu is
+// transparent.
 
 // CHECK: module attributes {
-// CHECK-SAME: stream.topology = #hal.device.topology<links = [(@npu -> @cpu = {transparent_access = true}), (@cpu -> @npu = {transparent_access = true})]>
+// CHECK-SAME: stream.topology = #hal.device.topology<links = [(@npu -> @cpu = {}), (@cpu -> @npu = {transparent_access = true})]>
 module attributes {stream.affinity.default = #hal.device.affinity<@npu>} {
   util.global private @cpu = #hal.device.target<"local", [#hal.executable.target<"llvm-cpu", "embedded-elf-x86_64", {}>]> : !hal.device
   util.global private @npu = #hal.device.target<"amdxdna", [#hal.executable.target<"amd-aie", "amdaie-pdi-fb", {num_cols = 8 : i32, num_rows = 4 : i32, target_device = "npu4", ukernels = "none"}>]> : !hal.device
@@ -66,7 +69,7 @@ module attributes {stream.affinity.default = #hal.device.affinity<@npu>} {
 // @npu0 <-> @cpu -- the extra accelerator @npu1 is not referenced (DCE'd).
 
 // CHECK: module attributes {
-// CHECK-SAME: stream.topology = #hal.device.topology<links = [(@npu0 -> @cpu = {transparent_access = true}), (@cpu -> @npu0 = {transparent_access = true})]>
+// CHECK-SAME: stream.topology = #hal.device.topology<links = [(@npu0 -> @cpu = {}), (@cpu -> @npu0 = {transparent_access = true})]>
 module attributes {stream.affinity.default = #hal.device.affinity<@npu0>} {
   util.global private @npu0 = #hal.device.target<"amdxdna", [#hal.executable.target<"amd-aie", "amdaie-pdi-fb", {num_cols = 8 : i32, num_rows = 4 : i32, target_device = "npu4", ukernels = "none"}>]> : !hal.device
   util.global private @npu1 = #hal.device.target<"amdxdna", [#hal.executable.target<"amd-aie", "amdaie-pdi-fb", {num_cols = 8 : i32, num_rows = 4 : i32, target_device = "npu4", ukernels = "none"}>]> : !hal.device
