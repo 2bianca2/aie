@@ -109,7 +109,18 @@ static std::optional<PaddingMultiples> getPaddingMultiples(
       deviceModel.getAIEMatmulInstructionSize(lhsElemType, rhsElemType,
                                               accElemType);
   if (failed(instr)) return std::nullopt;
-  // The default scalar pack-peel pipeline uses 2-level tiling (kPackScaleL1 = 1).
+  // M and N come from the device tables. K does not: the reduction tile is
+  // pinned to the default scalar pack-peel pipeline's 2-level tiling
+  // (kPackScaleL1 = 1), because the tile pipeline is a global option and is not
+  // on the executable target attr, so it cannot be read per dispatch here. Two
+  // consequences, neither reachable in the configuration that is validated
+  // today but both real once it widens:
+  //   * pack-peel-4-level-tiling uses kPackScaleL1 = 2 (KernelDispatch.cpp),
+  //     i.e. a K tile of 64, so padding to 32 is too little and the
+  //     divisibility failure this pass exists to prevent comes back.
+  //   * with ukernels enabled KernelDispatch picks a factor of K instead, so
+  //     padding K at all is unnecessary work. `ukernels` *is* on the target
+  //     attr, so that half could be handled without any new plumbing.
   return PaddingMultiples{/*m=*/*numRows * (*instr)[0],
                           /*n=*/*numCols * (*instr)[1],
                           /*k=*/getPackPeelReductionTile(/*kPackScaleL1=*/1)};

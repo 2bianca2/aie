@@ -73,6 +73,13 @@ struct AMDAIEOptions {
   int callReplication{1};
   bool insertLoopAroundCoreBlock{false};
   bool matmulElementwiseFusion{false};
+  // Bound to a single global flag, and this options struct is per plugin
+  // session rather than per declared device, so every amd-aie device global in
+  // a compile gets the same target_device / num_rows / num_cols. Declaring two
+  // amd-aie devices of *different* models (say an npu4 and an npu1_4col in one
+  // compile) is therefore not expressible today. A second NPU from another
+  // vendor is fine -- that is a separate plugin with its own options struct --
+  // so this only binds when two devices of this plugin need to differ.
   AMDAIEDevice AMDAIETargetDevice{AMDAIEDevice::npu1_4col};
 
   // Enable/Disable reprogramming of DMAs.
