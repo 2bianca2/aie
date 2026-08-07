@@ -16,12 +16,15 @@
 
 ```bash
 # 호스트에서 (repo 루트)
+#   --input    : 순서 = func arg 순서, .npy만. 아래 "입력 npy 준비"에서 먼저 만든다
+#   --expected : (선택) 비교 대상
+#   --pass     : (선택) 특정 pass before/after 추출
 ./scripts/docker/run-debug.sh \
   --model models/mlp_2layer/mlp_2layer.onnx \
   --function mlp_2layer \
-  --input x.npy \                                  # 순서 = func arg 순서, .npy만
-  --expected expected.npy \                        # (선택) 비교 대상
-  --pass iree-amdaie-lower-to-aie \                # (선택) 특정 pass before/after 추출
+  --input debug_out/_inputs/x.npy \
+  --expected debug_out/_inputs/expected.npy \
+  --pass iree-amdaie-lower-to-aie \
   --label run1
 ```
 
@@ -67,6 +70,9 @@ x = rng.standard_normal((128,128)).astype(np.float32); np.save(f"{d}/x.npy", x)
 같은 모델을 CPU로 컴파일해 얻는다:
 ```bash
 # (컨테이너 안) golden = 동일 모델의 llvm-cpu 실행 결과.
+# import_onnx는 venv + PYTHONPATH가 필요하다 (위 2-4와 동일).
+source /opt/venv/bin/activate
+export PYTHONPATH=/workspace/build/compiler/bindings/python
 # .mlir은 생성물이라 repo에 없다 — 먼저 import한다.
 python3 -m iree.compiler.tools.import_onnx models/mlp_2layer/mlp_2layer.onnx \
   -o /tmp/mlp_2layer.mlir
@@ -159,7 +165,7 @@ MANIFEST.txt                   # full 실행 명령 + rc + 소요시간 (재현�
 ```bash
 # 1) baseline: 모든 phase IR 1회 덤프 + vmfb + NPU 실행 (full 모드)
 ./scripts/docker/run-debug.sh --model models/mlp_2layer/mlp_2layer.onnx --function mlp_2layer \
-  --input debug_out/_inputs/x.npy --input debug_out/_inputs/w1.npy --input debug_out/_inputs/w2.npy \
+  --input debug_out/_inputs/x.npy \
   --label base
 #   -> debug_out/mlp_2layer_base/phases/{1.input … 10.executable-targets … 12.vm}.mlir + model.vmfb
 
@@ -186,12 +192,12 @@ MANIFEST.txt                   # full 실행 명령 + rc + 소요시간 (재현�
 (b) 덤프한 phase IR에서 vmfb까지 이어 컴파일한 뒤 실행한다(프론트엔드 skip):
 ```bash
 # 컨테이너 안. <dir> = debug_out/<model>_<label>
-iree-compile <dir>/phases/9.executable-configurations.mlir \
+/workspace/build/tools/iree-compile <dir>/phases/9.executable-configurations.mlir \
   --iree-hal-target-backends=amd-aie --iree-amdaie-target-device=npu4 \
   --iree-amd-aie-peano-install-dir=$PEANO_INSTALL_DIR --iree-amdaie-stack-size=2048 \
   --compile-from=executable-configurations -o /tmp/resumed.vmfb
-iree-run-module --device=amdxdna --module=/tmp/resumed.vmfb --function=mlp_2layer \
-  --input=@x.npy --input=@w1.npy --input=@w2.npy --output=@/tmp/out0.npy
+/workspace/build/tools/iree-run-module --device=amdxdna --module=/tmp/resumed.vmfb --function=mlp_2layer \
+  --input=@debug_out/_inputs/x.npy --output=@/tmp/out0.npy
 ```
 
 ## phase 덤프/재개 플래그 (배경)

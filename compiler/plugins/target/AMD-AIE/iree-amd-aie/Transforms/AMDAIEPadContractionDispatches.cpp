@@ -262,12 +262,16 @@ static IREE::HAL::DeviceAffinityAttr getHostAffinity(ModuleOp module) {
   // land on a device that cannot codegen it).
   //
   // The table currently recognizes only llvm-cpu as a host, so a host declared
-  // with any other backend yields null here and the callers below return
-  // without padding anything. That is silent: the dispatch that needed padding
-  // simply fails divisibility much later. The right shape is to move the check
-  // after the dispatch walk, so "nothing to pad" and "something to pad but
-  // nowhere to put it" can be told apart and only the latter is reported. Not
-  // done here because every declarable host today is llvm-cpu.
+  // with any other backend yields null here and both callers below return
+  // having done nothing. That is silent, and the two of them fail differently:
+  // the padding pass leaves a dispatch that later fails divisibility, while the
+  // split pass leaves a weight DMA that degrades into a serial BD chain and
+  // stalls, i.e. a runtime timeout. The right shape is to move the check after
+  // the dispatch walk, so "nothing to do" and "something to do but nowhere to
+  // put it" can be told apart and only the latter is reported. Not done here
+  // because in this build llvm-cpu is the only host backend that can be
+  // declared at all (configure.sh builds no other), so the case is currently
+  // unreachable rather than merely unlikely.
   return getFirstDeviceWithRole(module, DeviceRole::Host);
 }
 
@@ -638,8 +642,9 @@ void AMDAIESplitLargeContractionDispatchesPass::runOnOperation() {
   //    not split at all. No other element type or device was measured.
   //  - kKThreshold is compared in ELEMENTS, while the shim limit it stands in
   //    for is a limit on words. An f32 weight at K=2048 has the same byte
-  //    footprint as the bf16 K=4096 case that set this number, but does not
-  //    trigger the split.
+  //    footprint as a bf16 weight at the K=4096 boundary, but sits even further
+  //    below the threshold, so element types other than bf16 are compared
+  //    against the wrong number.
   //  - Getting it wrong does not produce wrong numbers. The weight DMA degrades
   //    into a serial BD chain and stalls, so the symptom is a runtime timeout
   //    (ert state 6), which is easy to misattribute.

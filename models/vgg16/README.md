@@ -1,6 +1,6 @@
 # VGG-16 (ONNX) end-to-end on npu4
 
-Full `vgg16-12.onnx` — 13 conv + 13 relu + 5 maxpool + flatten + 3 FC,
+Full `vgg16-12.onnx` — 13 conv + 15 relu + 5 maxpool + 3 flatten + 3 FC + 2 dropout,
 input `[1,3,224,224]` -> `[1,1000]` logits — compiled and run heterogeneously:
 conv/matmul on the NPU, pooling/flatten/layout ops on the CPU.
 
@@ -14,8 +14,8 @@ them is optional today.
 Not committed (528 MB). From the ONNX Model Zoo:
 
 ```bash
-cd models/vgg16
-curl -fSLO https://github.com/onnx/models/raw/main/validated/vision/classification/vgg/model/vgg16-12.onnx
+curl -fSL -o models/vgg16/vgg16-12.onnx \
+  https://github.com/onnx/models/raw/main/validated/vision/classification/vgg/model/vgg16-12.onnx
 ```
 
 ## 2. Host prerequisites
@@ -32,10 +32,22 @@ at compile time.
 
 ## 3. Compile and run
 
-Inside the dev container (`./scripts/docker/run-dev.sh`), from `/workspace`:
+Inside the dev container (`./scripts/docker/run-dev.sh`), from `/workspace` (not
+from `models/vgg16` — every path below is relative to the repo root):
 
 ```bash
+# import_onnx and the checker in 3b both live in the container's venv.
+source /opt/venv/bin/activate
+export PYTHONPATH=/workspace/build/compiler/bindings/python
+
 python3 -m iree.compiler.tools.import_onnx models/vgg16/vgg16-12.onnx -o /tmp/vgg.mlir
+
+# The run below reads one [1,3,224,224] float32 image. Any input exercises the
+# pipeline; a fixed random one keeps the numbers reproducible. Pass a real
+# preprocessed image instead when you care about the predicted class rather
+# than about the compiler.
+python3 -c "import numpy as np; np.random.seed(1); \
+  np.save('input.npy', (np.random.randn(1,3,224,224)*0.2).astype(np.float32))"
 
 build/tools/iree-compile /tmp/vgg.mlir -o /tmp/vgg.vmfb \
   --iree-hal-target-device=npu=amdxdna \
@@ -56,18 +68,6 @@ build/tools/iree-run-module --device=amdxdna --device=local-task \
   --module=/tmp/vgg.vmfb --function=mxnet_converted_model \
   --input=@input.npy --output=@out.npy
 ```
-
-The run needs an `input.npy` holding one `[1,3,224,224]` float32 image. Any
-input works for checking the pipeline; a fixed random one keeps the numbers
-reproducible:
-
-```bash
-python3 -c "import numpy as np; np.random.seed(1); \
-  np.save('input.npy', (np.random.randn(1,3,224,224)*0.2).astype(np.float32))"
-```
-
-Pass a real preprocessed image instead when you care about the predicted class
-rather than about the compiler.
 
 The entry function name comes from the ONNX graph name; read it back with
 `grep -oE "func.func @[A-Za-z0-9_]+" /tmp/vgg.mlir | head -1`.
