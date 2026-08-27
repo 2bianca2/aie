@@ -140,6 +140,94 @@ let extraClassDeclaration = [{
 }];
 }
 
+// [wmkim] added: the REAL AIE2P bf16 matmul pipeline. AIEVec2PMacConfAcc2048BF16IntrOp
+// [wmkim] above (raw v64bf16 x v64bf16 -> v64f32) turned out to not correspond to
+// [wmkim] any real hardware calling convention: it silently produced garbage on
+// [wmkim] real hardware (all-zero after the cMode fix below became a
+// [wmkim] non-zero-but-wrong result). AIE2P's bf16 MAC datapath actually
+// [wmkim] operates on "BFP" (block floating point, one shared 8-bit exponent per
+// [wmkim] 8-lane group) operands, not raw bf16 - confirmed against the
+// [wmkim] validated reference in uKernels/npu4/peano/matmul.cc
+// [wmkim] (matmul_vectorized_bf16_f32 / load_v64bf16_as_bfp16(_T) / mac_8x8_8x8T),
+// [wmkim] and by compiling the aie2p_ups.h/aie2p_srs.h/aie2p_vmult.h peano
+// [wmkim] intrinsic headers with `clang --target=aie2p-none-unknown-elf
+// [wmkim] -S -emit-llvm` and inspecting the emitted LLVM IR for the true
+// [wmkim] intrinsic names/signatures (the upstream .td intrinsic sources aren't
+// [wmkim] shipped with this peano release, only the C++ intrinsic headers and a
+// [wmkim] prebuilt clang, so this was the only way to recover them).
+// [wmkim] The 3 ops below implement: ups (widen bf16->f32 accumulator),
+// [wmkim] pack (f32 accumulator -> block-floating-point mantissa/exponent
+// [wmkim] pair), and the real mac. See MatMulOpConversion in AIEVecToLLVM.cpp
+// [wmkim] for how they + the vshuffle op above are combined to reproduce
+// [wmkim] matmul_vectorized_bf16_f32's data flow.
+
+// ups: widen 32 bf16 lanes to a 32-lane f32 accumulator.
+// Mirrors int_aie2p_v32bf16_to_v32accfloat (name recovered from codegen, see
+// [wmkim] comment above; not independently confirmed against a .td source).
+def AIEVec2PUpsV32BF16IntrOp :
+    AIEVec2P_IntrOp<"v32bf16.to.v32accfloat",
+        [TypeIs<"res", VectorOfLengthAndType<[32], [F32]>>]>,
+    Arguments<(ins VectorOfLengthAndType<[32], [BF16]>:$src)>{
+let extraClassDeclaration = [{
+    static SmallVector<Type> expectedArgTypes(MLIRContext *context) {
+        return {VectorType::get({32}, BFloat16Type::get(context))};
+    }
+    static Type expectedResultType(MLIRContext *context) {
+        return VectorType::get({32}, Float32Type::get(context));
+    }
+}];
+}
+
+// Pack a 64-lane f32 accumulator into block-floating-point form: a struct of
+// {64x i8 mantissa, 8x i8 exponent} (one shared exponent per 8-lane group,
+// hence 64/8 = 8 exponents). Mirrors int_aie2p_v64accfloat_to_v64bfp16ebs8.
+def AIEVec2PToBfp16Ebs8IntrOp :
+    AIEVec2P_IntrOp<"v64accfloat.to.v64bfp16ebs8", []>,
+    Arguments<(ins VectorOfLengthAndType<[64], [F32]>:$src)>{
+let extraClassDeclaration = [{
+    static SmallVector<Type> expectedArgTypes(MLIRContext *context) {
+        return {VectorType::get({64}, Float32Type::get(context))};
+    }
+    static Type expectedResultType(MLIRContext *context) {
+        return LLVM::LLVMStructType::getLiteral(
+            context, {VectorType::get({64}, IntegerType::get(context, 8)),
+                      VectorType::get({8}, IntegerType::get(context, 8))});
+    }
+}];
+}
+
+// The real 8x8x8 bf16 MAC: takes mantissa/exponent pairs for both operands
+// (the "BFP576" name = 64x8b mantissa + 8x8b exponent = 512+64 = 576 bits),
+// an i32-bitcast f32 accumulator, and a config word. Mirrors
+// int_aie2p_BFP576_BFP576_ACC2048_mac_conf / mac_8x8_8x8T's underlying
+// builtin. Unlike AIEVec2PMacConfAcc2048BF16IntrOp above, this one is backed
+// by real hardware behavior confirmed via the peano ukernel reference.
+def AIEVec2PBfp576MacConfIntrOp :
+    AIEVec2P_IntrOp<"BFP576.BFP576.ACC2048.mac.conf",
+        [TypeIs<"res", VectorOfLengthAndType<[64], [I32]>>]>,
+    Arguments<(ins VectorOfLengthAndType<[64], [I8]>:$aMantissa,
+                   VectorOfLengthAndType<[8], [I8]>:$aExponent,
+                   VectorOfLengthAndType<[64], [I8]>:$bMantissa,
+                   VectorOfLengthAndType<[8], [I8]>:$bExponent,
+                   VectorOfLengthAndType<[64], [I32]>:$acc,
+                   I32:$conf)>{
+let extraClassDeclaration = [{
+    static SmallVector<Type> expectedArgTypes(MLIRContext *context) {
+        return {
+            VectorType::get({64}, IntegerType::get(context, 8)),
+            VectorType::get({8}, IntegerType::get(context, 8)),
+            VectorType::get({64}, IntegerType::get(context, 8)),
+            VectorType::get({8}, IntegerType::get(context, 8)),
+            VectorType::get({64}, IntegerType::get(context, 32)),
+            IntegerType::get(context, 32)
+        };
+    }
+    static Type expectedResultType(MLIRContext *context) {
+        return VectorType::get({64}, IntegerType::get(context, 32));
+    }
+}];
+}
+
 // [wmkim] added: AIE2P vshuffle intrinsic (needed to lower a 1024-bit/16-bit
 // [wmkim] element/8x8 vector.transpose, e.g. an 8x8 bf16 tile, since AIE2P's
 // [wmkim] vshuffle hardware unit - like AIE2's - is fixed at 512 bits. A

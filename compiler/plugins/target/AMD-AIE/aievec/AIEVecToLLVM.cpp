@@ -140,6 +140,108 @@ static VectorType getFlattenedVectorType(VectorType vecTy) {
       vecTy.getElementType());
 }
 
+// [wmkim] added: AIE2P's bf16 MAC datapath does not accept raw bf16 vectors.
+// [wmkim] It requires both operands to be converted into "BFP16EBS8" form
+// [wmkim] (block floating point: one shared 8-bit exponent per 8-lane group,
+// [wmkim] i.e. 64 mantissa bytes + 8 exponent bytes). This reproduces the
+// [wmkim] validated reference in uKernels/npu4/peano/matmul.cc
+// [wmkim] (load_v64bf16_as_bfp16 / load_v64bf16_as_bfp16_T): split the
+// [wmkim] 64-lane bf16 vector into two 32-lane halves, optionally apply the
+// [wmkim] "transpose" shuffle sequence (only used for the B/rhs operand),
+// [wmkim] widen each half to a 32-lane f32 accumulator via `ups`, concat
+// [wmkim] into a 64-lane f32 accumulator, then pack into {v64i8 mantissa,
+// [wmkim] v8i8 exponent} via the AIE2P-only `to_v64bfp16ebs8` intrinsic. See
+// [wmkim] the comment above AIEVec2PBfp576MacConfIntrOp in XLLVMOps.td for
+// [wmkim] how the real intrinsic signatures used here were recovered (the
+// [wmkim] naive raw-bf16 intrinsic this replaces silently produced wrong
+// [wmkim] results on real hardware).
+static std::pair<Value, Value> emitBf16ToBfp16Ebs8(
+    ConversionPatternRewriter &rewriter, Location loc, Value v64bf16,
+    bool applyTransposeShuffle) {
+  MLIRContext *ctx = rewriter.getContext();
+  auto v16i32Ty = VectorType::get({16}, rewriter.getI32Type());
+  auto v32f32Ty = VectorType::get({32}, rewriter.getF32Type());
+  auto v64f32Ty = VectorType::get({64}, rewriter.getF32Type());
+  auto v32bf16Ty = VectorType::get({32}, rewriter.getBF16Type());
+
+  // Extract the lo/hi 32-lane halves out of the flattened 64-lane bf16
+  // vector via llvm.shufflevector single-operand "extract" masks.
+  SmallVector<int32_t> loMask, hiMask;
+  for (int32_t i = 0; i < 32; ++i) loMask.push_back(i);
+  for (int32_t i = 32; i < 64; ++i) hiMask.push_back(i);
+  Value lo = LLVM::ShuffleVectorOp::create(rewriter, loc, v64bf16, v64bf16,
+                                           loMask)
+                 .getResult();
+  Value hi = LLVM::ShuffleVectorOp::create(rewriter, loc, v64bf16, v64bf16,
+                                           hiMask)
+                 .getResult();
+
+  if (applyTransposeShuffle) {
+    // v0_shuffled = shuffle(v0, 29); v1_shuffled = shuffle(v1, 29);
+    // (single-operand shuffle, rhs = undef)
+    // v_shuffled_lo = shuffle(v0_shuffled, v1_shuffled, 14);
+    // v_shuffled_hi = shuffle(v0_shuffled, v1_shuffled, 15);
+    Value undef16 =
+        xllvm::AIEVec2UndefV16I32IntrOp::create(rewriter, loc, v16i32Ty)
+            .getResult();
+    auto mkModeCst = [&](int32_t mode) {
+      return LLVM::ConstantOp::create(rewriter, loc, rewriter.getI32Type(),
+                                      mode)
+          .getResult();
+    };
+    auto shuffle1 = [&](Value operand) -> Value {
+      Value operandI32 = bitcastValueToType(rewriter, loc, operand, v16i32Ty);
+      Value res = xllvm::AIEVec2PVectorShuffleIntrOp::create(
+                      rewriter, loc, v16i32Ty,
+                      ValueRange{operandI32, undef16, mkModeCst(29)})
+                      .getResult();
+      return bitcastValueToType(rewriter, loc, res, v32bf16Ty);
+    };
+    Value loShuf = shuffle1(lo);
+    Value hiShuf = shuffle1(hi);
+    auto shuffle2 = [&](Value a, Value b, int32_t mode) -> Value {
+      Value aI32 = bitcastValueToType(rewriter, loc, a, v16i32Ty);
+      Value bI32 = bitcastValueToType(rewriter, loc, b, v16i32Ty);
+      Value res = xllvm::AIEVec2PVectorShuffleIntrOp::create(
+                      rewriter, loc, v16i32Ty,
+                      ValueRange{aI32, bI32, mkModeCst(mode)})
+                      .getResult();
+      return bitcastValueToType(rewriter, loc, res, v32bf16Ty);
+    };
+    lo = shuffle2(loShuf, hiShuf, 14);
+    hi = shuffle2(loShuf, hiShuf, 15);
+  }
+
+  Value loF32 =
+      xllvm::AIEVec2PUpsV32BF16IntrOp::create(rewriter, loc, v32f32Ty, lo)
+          .getResult();
+  Value hiF32 =
+      xllvm::AIEVec2PUpsV32BF16IntrOp::create(rewriter, loc, v32f32Ty, hi)
+          .getResult();
+
+  SmallVector<int32_t> concatMask;
+  for (int32_t i = 0; i < 64; ++i) concatMask.push_back(i);
+  Value accF32 = LLVM::ShuffleVectorOp::create(rewriter, loc, loF32, hiF32,
+                                               concatMask)
+                    .getResult();
+
+  Type v64i8Ty = VectorType::get({64}, rewriter.getI8Type());
+  Type v8i8Ty = VectorType::get({8}, rewriter.getI8Type());
+  auto packedStructTy =
+      LLVM::LLVMStructType::getLiteral(ctx, {v64i8Ty, v8i8Ty});
+  Value packed = xllvm::AIEVec2PToBfp16Ebs8IntrOp::create(
+                     rewriter, loc, packedStructTy, accF32)
+                    .getResult();
+
+  Value mantissa =
+      LLVM::ExtractValueOp::create(rewriter, loc, packed, ArrayRef<int64_t>{0})
+          .getResult();
+  Value exponent =
+      LLVM::ExtractValueOp::create(rewriter, loc, packed, ArrayRef<int64_t>{1})
+          .getResult();
+  return {mantissa, exponent};
+}
+
 //
 // The following information is obtained from the ISA specification:
 //
@@ -649,8 +751,25 @@ class MatMulOpConversion
       signX = cast<IntegerType>(lhsElType).isUnsigned() ? 0 : 1;
       signY = cast<IntegerType>(rhsElType).isUnsigned() ? 0 : 1;
     }
-    configuration = {signX, signY, aMode, bMode,
-                     /*cMode=*/0};
+    // [wmkim] added: AIE2P's bf16 (float-accumulate) MAC intrinsics require
+    // [wmkim] cMode ("variant" in peano's aie2p_compute_control helper,
+    // [wmkim] lib/clang/19/include/aie2p_vmult.h) to be 1, not 0. Verified by
+    // [wmkim] inspecting peano's generated bf16 intrinsic wrappers (e.g.
+    // [wmkim] mac_elem_64): they all call
+    // [wmkim] aie2p_compute_control(sgn_x, sgn_y, /*amode=*/2, /*bmode=*/3,
+    // [wmkim] /*variant=*/1, ...) for the bf16xbf16->f32 case, whereas the
+    // [wmkim] int8/int32 AIE2P MAC wrappers (e.g. mac_8x8_8x8) use variant=0
+    // [wmkim] (matching what we already had). Using cMode=0 for AIE2P bf16
+    // [wmkim] matmul silently produced an all-zero accumulator result on real
+    // [wmkim] hardware (wrong "variant" of the MAC datapath), even though the
+    // [wmkim] op compiled and ran without error - root-caused via mlp_2layer
+    // [wmkim] all-zero NPU output after ruling out stale build artifacts.
+    // [wmkim] AIE2's bf16 MAC intrinsic (bf.mac16.conf) is a different
+    // [wmkim] hardware unit and still correctly uses cMode=0 (see the
+    // [wmkim] existing @matmulbf16bf16f32 lit test, conf=28).
+    uint32_t cMode =
+        (AMDAIE::isAie2P(device) && isa<Float32Type>(accElType)) ? 1 : 0;
+    configuration = {signX, signY, aMode, bMode, cMode};
 
     // Flatten the inputs
     VectorType lhsFlattenedVecTy = getFlattenedVectorType(lhsVecTy);
@@ -689,10 +808,43 @@ class MatMulOpConversion
               xllvm::AIEVec2PMacConfAcc512BF16IntrOp>(
               rewriter, loc, {lhs, rhs, acc, confCst});
         } else if (lhsLanes == 64) {
+          // [wmkim] added: replaced the naive raw-bf16
+          // [wmkim] AIEVec2PMacConfAcc2048BF16IntrOp call (which silently
+          // [wmkim] produced wrong results on real hardware - it doesn't
+          // [wmkim] correspond to any real AIE2P calling convention) with the
+          // [wmkim] real bfp16/shuffle pipeline reproduced from
+          // [wmkim] uKernels/npu4/peano/matmul.cc. A gets converted to BFP16
+          // [wmkim] form directly; B additionally gets the "transpose"
+          // [wmkim] shuffle sequence first (per load_v64bf16_as_bfp16_T).
+          // [wmkim] This new pipeline uses its own DataPathConfiguration
+          // [wmkim] (signX=signY=1, aMode=2, bMode=1, cMode=0), matching
+          // [wmkim] peano's mac_8x8_8x8T call - distinct from `configuration`
+          // [wmkim] /`confCst` computed above, which was tuned for the old,
+          // [wmkim] now-unused intrinsic.
+          auto [aMantissa, aExponent] =
+              emitBf16ToBfp16Ebs8(rewriter, loc, lhs,
+                                  /*applyTransposeShuffle=*/false);
+          auto [bMantissa, bExponent] =
+              emitBf16ToBfp16Ebs8(rewriter, loc, rhs,
+                                  /*applyTransposeShuffle=*/true);
+          Type v64i32Ty = VectorType::get({64}, rewriter.getI32Type());
+          Value accI32 = bitcastValueToType(rewriter, loc, acc, v64i32Ty);
+          DataPathConfiguration bfpConfig(/*xSigned=*/true, /*ySigned=*/true,
+                                          /*aMode=*/2, /*bMode=*/1,
+                                          /*cMode=*/0);
+          Value bfpConfCst =
+              LLVM::ConstantOp::create(
+                  rewriter, loc, i32ty,
+                  rewriter.getI32IntegerAttr(bfpConfig.get()))
+                  .getResult();
+          Value macResI32 =
+              xllvm::AIEVec2PBfp576MacConfIntrOp::create(
+                  rewriter, loc, v64i32Ty,
+                  ValueRange{aMantissa, aExponent, bMantissa, bExponent,
+                            accI32, bfpConfCst})
+                  .getResult();
           matMulResVal =
-              forceCastOperandsAndCreateTarget<
-                  xllvm::AIEVec2PMacConfAcc2048BF16IntrOp>(
-                  rewriter, loc, {lhs, rhs, acc, confCst});
+              bitcastValueToType(rewriter, loc, macResI32, accFlattenedVecTy);
         } else {
           llvm_unreachable(
               "Unsupported bf16 matmul shape for AIE2P: expected a flattened "
