@@ -181,9 +181,18 @@ static std::pair<Value, Value> emitBf16ToBfp16Ebs8(
     // (single-operand shuffle, rhs = undef)
     // v_shuffled_lo = shuffle(v0_shuffled, v1_shuffled, 14);
     // v_shuffled_hi = shuffle(v0_shuffled, v1_shuffled, 15);
-    Value undef16 =
-        xllvm::AIEVec2UndefV16I32IntrOp::create(rewriter, loc, v16i32Ty)
-            .getResult();
+    // [wmkim] added: was xllvm::AIEVec2UndefV16I32IntrOp (an AIE2-only
+    // [wmkim] intrinsic, llvm.aie2.v16int32) here, on the assumption
+    // [wmkim] (documented in ShuffleOpConversion below) that it's reused
+    // [wmkim] as-is for AIE2P. That held for small cases (mlp_2layer,
+    // [wmkim] mm8x8), but VGG16 (much larger, many more shuffle sites)
+    // [wmkim] failed with "LLVM ERROR: cannot select: ... G_INTRINSIC
+    // [wmkim] intrinsic(@llvm.aie2.v16int32)" in llc for the AIE2P
+    // [wmkim] (npu4/Strix) target - it isn't actually selectable there.
+    // [wmkim] LLVM::PoisonOp is architecture-independent (plain "don't
+    // [wmkim] care" lanes, no target intrinsic call) and sidesteps this
+    // [wmkim] entirely.
+    Value undef16 = LLVM::PoisonOp::create(rewriter, loc, v16i32Ty).getResult();
     auto mkModeCst = [&](int32_t mode) {
       return LLVM::ConstantOp::create(rewriter, loc, rewriter.getI32Type(),
                                       mode)
@@ -933,9 +942,8 @@ class ShuffleOpConversion
     // [wmkim] compiling with AIE2P bf16 vectorization enabled. AIE2P's
     // [wmkim] vshuffle intrinsic (xllvm::AIEVec2PVectorShuffleIntrOp, see
     // [wmkim] XLLVMOps.td) has the exact same v16i32/v16i32/i32->v16i32
-    // [wmkim] signature as AIE2's, so the undef-rhs fallback
-    // [wmkim] (AIEVec2UndefV16I32IntrOp) and the rest of this function's
-    // [wmkim] logic are reused as-is for both devices.
+    // [wmkim] signature as AIE2's, so the rest of this function's logic is
+    // [wmkim] reused as-is for both devices.
     assert((AMDAIE::isAie2(device) || AMDAIE::isAie2P(device)) &&
            "ShuffleOp currently only supports AIE2/AIE2P.");
     auto loc = shuffleOp.getLoc();
@@ -944,7 +952,15 @@ class ShuffleOpConversion
     auto i32ty = rewriter.getI32Type();
     auto v16xi32ty = VectorType::get({16}, i32ty);
     if (!rhs) {
-      rhs = xllvm::AIEVec2UndefV16I32IntrOp::create(rewriter, loc, v16xi32ty);
+      // [wmkim] added: was xllvm::AIEVec2UndefV16I32IntrOp
+      // [wmkim] (llvm.aie2.v16int32) here. That's an AIE2-only intrinsic -
+      // [wmkim] the claim above that it's shared with AIE2P turned out to be
+      // [wmkim] false at scale: VGG16 hit "LLVM ERROR: cannot select ...
+      // [wmkim] llvm.aie2.v16int32" in llc for the AIE2P/npu4 target (small
+      // [wmkim] cases like mlp_2layer happened not to trip it). LLVM::PoisonOp
+      // [wmkim] is architecture-independent and avoids the intrinsic
+      // [wmkim] entirely for what's just a "don't care" operand.
+      rhs = LLVM::PoisonOp::create(rewriter, loc, v16xi32ty);
     }
 
     auto modeAttrVal =
