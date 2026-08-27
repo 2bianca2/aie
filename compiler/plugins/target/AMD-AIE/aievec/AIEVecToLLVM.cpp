@@ -690,7 +690,8 @@ class MatMulOpConversion
               rewriter, loc, {lhs, rhs, acc, confCst});
         } else if (lhsLanes == 64) {
           matMulResVal =
-              forceCastOperandsAndCreateTarget<xllvm::AIEVec2PMacConfBF16IntrOp>(
+              forceCastOperandsAndCreateTarget<
+                  xllvm::AIEVec2PMacConfAcc2048BF16IntrOp>(
                   rewriter, loc, {lhs, rhs, acc, confCst});
         } else {
           llvm_unreachable(
@@ -698,7 +699,7 @@ class MatMulOpConversion
               "lhs of 32 or 64 bf16 lanes");
         }
       } else if (AMDAIE::isAie2(device)) {
-        matMulResVal = rmsi
+        matMulResVal =
             forceCastOperandsAndCreateTarget<xllvm::AIEVec2MacConfBF16IntrOp>(
                 rewriter, loc, {lhs, rhs, acc, confCst});
       } else {

@@ -134,7 +134,7 @@ SmallVector<std::array<Type, 3>> getSuportedAie2PTypes(MLIRContext *context) {
   //   - 8x8x8: same shape as AIE2P's int8 matmul just above, so it reuses
   //     the tile size the rest of the AIE2P codegen path is already tuned
   //     for.
-  types.push_back(N(/* M= */ 4, /* N= */ 4, /* K= */ 8, context));
+  types.push_back(getBFloatMatmul(/* M= */ 4, /* N= */ 4, /* K= */ 8, context));
   types.push_back(getBFloatMatmul(/* M= */ 8, /* N= */ 8, /* K= */ 8, context));
   return types;
 }
