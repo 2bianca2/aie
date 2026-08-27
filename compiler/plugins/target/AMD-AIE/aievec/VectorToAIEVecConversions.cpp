@@ -913,6 +913,32 @@ static void configureAIEVecCommonLegalizations(ConversionTarget &target) {
 static void configureAIEVecV2Legalizations(ConversionTarget &target) {
   target.addLegalOp<UnrealizedConversionCastOp>();
   target.addLegalOp<vector::ShapeCastOp>();
+  // [wmkim] added: needed by the new 1024-bit (AIE2P 8x8 bf16)
+  // [wmkim] transpose-splitting branch in
+  // [wmkim] LowerVectorTransposeOpToAIEVecShuffleOpPattern, which builds the
+  // [wmkim] lo/hi halves via vector.extract/vector.insert and a zero
+  // [wmkim] arith.constant. Confirmed via --debug-only=dialect-conversion
+  // [wmkim] that the pattern matched and produced correct new ops, but the
+  // [wmkim] overall legalization still failed because vector.extract wasn't
+  // [wmkim] in the legal set (unlike ShapeCastOp/ShuffleOp, which the
+  // [wmkim] pre-existing 512-bit path already relies on and which were
+  // [wmkim] already legal).
+  target.addLegalOp<vector::ExtractOp>();
+  target.addLegalOp<vector::InsertOp>();
+  target.addLegalOp<arith::ConstantOp>();
+  // [wmkim] added: needed by the new 1024-bit (AIE2P 8x8 bf16)
+  // [wmkim] transpose-splitting branch in
+  // [wmkim] LowerVectorTransposeOpToAIEVecShuffleOpPattern, which builds the
+  // [wmkim] lo/hi halves via vector.extract/vector.insert and a zero
+  // [wmkim] arith.constant. Confirmed via --debug-only=dialect-conversion
+  // [wmkim] that the pattern matched and produced correct new ops, but the
+  // [wmkim] overall legalization still failed because vector.extract wasn't
+  // [wmkim] in the legal set (unlike ShapeCastOp/ShuffleOp, which the
+  // [wmkim] pre-existing 512-bit path already relies on and which were
+  // [wmkim] already legal).
+  target.addLegalOp<vector::ExtractOp>();
+  target.addLegalOp<vector::InsertOp>();
+  target.addLegalOp<arith::ConstantOp>();
 
   // A set recording the vector lane size and element width supported
   llvm::SmallSet<std::pair<unsigned, unsigned>, 16> laneSizeElWidthPairSet;

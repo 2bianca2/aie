@@ -40,6 +40,7 @@
 #include "mlir/Conversion/MathToLLVM/MathToLLVM.h"
 #include "mlir/Conversion/MemRefToLLVM/MemRefToLLVM.h"
 #include "mlir/Conversion/SCFToControlFlow/SCFToControlFlow.h"
+#include "mlir/Conversion/UBToLLVM/UBToLLVM.h"
 #include "mlir/Conversion/VectorToLLVM/ConvertVectorToLLVMPass.h"
 #include "mlir/Dialect/MemRef/Transforms/Passes.h"
 #include "mlir/Dialect/Vector/IR/VectorOps.h"
@@ -1286,6 +1287,17 @@ void addLowerToLLVMPasses(OpPassManager &pm) {
   pm.addPass(createCanonicalizerPass());
   pm.addPass(createCSEPass());
   pm.addPass(createConvertControlFlowToLLVMPass());
+  // [wmkim] added: the AIE2P 1024-bit transpose-splitting pattern
+  // [wmkim] (VectorToAIEVecConversions.cpp) builds a vector<2x32xbf16> via a
+  // [wmkim] zero arith.constant that gets fully overwritten by two
+  // [wmkim] vector.insert ops; MLIR's vector canonicalizer folds that dead
+  // [wmkim] initial constant into `ub.poison`. This hand-rolled AIE-core
+  // [wmkim] lowering pipeline (used for the peano/translateModuleToLLVMIR
+  // [wmkim] path below, separate from IREE's main pass pipeline and its
+  // [wmkim] getDependentDialects-based ConvertToLLVM interface registration
+  // [wmkim] in AIETarget.cpp) never needed to convert ub.poison to LLVM
+  // [wmkim] before, so this pass was missing.
+  pm.addPass(createUBToLLVMConversionPass());
   pm.addPass(
       mlir::iree_compiler::AMDAIE::createAMDAIERemoveWrapFlagFromGepPass());
   pm.addPass(createCanonicalizerPass());

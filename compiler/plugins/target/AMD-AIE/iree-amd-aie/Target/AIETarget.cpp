@@ -36,12 +36,14 @@
 #include "mlir/Conversion/IndexToLLVM/IndexToLLVM.h"
 #include "mlir/Conversion/MathToLLVM/MathToLLVM.h"
 #include "mlir/Conversion/MemRefToLLVM/MemRefToLLVM.h"
+#include "mlir/Conversion/UBToLLVM/UBToLLVM.h"
 #include "mlir/Dialect/DLTI/DLTI.h"
 #include "mlir/Dialect/EmitC/IR/EmitC.h"
 #include "mlir/Dialect/Func/Extensions/AllExtensions.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Math/IR/Math.h"
 #include "mlir/Dialect/Transform/IR/TransformDialect.h"
+#include "mlir/Dialect/UB/IR/UBOps.h"
 #include "mlir/Dialect/Vector/IR/VectorOps.h"
 #include "mlir/Parser/Parser.h"
 #include "mlir/Pass/PassManager.h"
@@ -215,7 +217,7 @@ class AIETargetBackend final : public IREE::HAL::TargetBackend {
         aievec::xllvm::XLLVMDialect, aievec::AIEVecDialect, emitc::EmitCDialect,
         LLVM::LLVMDialect, func::FuncDialect, cf::ControlFlowDialect,
         DLTIDialect, arith::ArithDialect, memref::MemRefDialect,
-        math::MathDialect, vector::VectorDialect>();
+        math::MathDialect, vector::VectorDialect, ub::UBDialect>();
 
     registerBuiltinDialectTranslation(registry);
     registerLLVMDialectTranslation(registry);
@@ -227,6 +229,20 @@ class AIETargetBackend final : public IREE::HAL::TargetBackend {
     index::registerConvertIndexToLLVMInterface(registry);
     registerConvertMathToLLVMInterface(registry);
     registerConvertMemRefToLLVMInterface(registry);
+    // [wmkim] added: needed because the AIE2P 1024-bit transpose-splitting
+    // [wmkim] pattern (VectorToAIEVecConversions.cpp) builds a
+    // [wmkim] vector<2x32xbf16> via a zero arith.constant that gets fully
+    // [wmkim] overwritten by two vector.insert ops; MLIR's vector
+    // [wmkim] canonicalizer folds that dead initial constant into
+    // [wmkim] `ub.poison`. Unlike arith/cf/func/index/math/memref above,
+    // [wmkim] there is no `registerUBDialectTranslation` (ub has no direct
+    // [wmkim] LLVM-IR translation) - instead `ub.poison` must first be
+    // [wmkim] *converted* to the LLVM dialect's `llvm.mlir.poison` op via
+    // [wmkim] the one-shot convert-to-llvm interface, same mechanism as the
+    // [wmkim] other dialects here. This is apparently the first code path
+    // [wmkim] in this compiler to produce ub.poison on the AIE core
+    // [wmkim] lowering path, so this interface was never registered before.
+    ub::registerConvertUBToLLVMInterface(registry);
   }
 
   void buildTranslationPassPipeline(IREE::HAL::ExecutableTargetAttr,
