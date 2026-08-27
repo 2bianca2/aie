@@ -65,6 +65,14 @@ def SHUFFLE_MODE_T16_16X2     : I32EnumAttrCase<"T16_16X2",     44, "t16_16x2">;
 def SHUFFLE_MODE_T16_2X16     : I32EnumAttrCase<"T16_2X16",     45, "t16_2x16">;
 def SHUFFLE_MODE_T8_8X4       : I32EnumAttrCase<"T8_8X4",       46, "t8_8x4">;
 def SHUFFLE_MODE_T8_4X8       : I32EnumAttrCase<"T8_4X8",       47, "t8_4x8">;
+// [wmkim] added: AIE2P-only modes. A 1024-bit (64-lane) 16-bit-element
+// [wmkim] square transpose (e.g. an 8x8 bf16 tile) doesn't fit in a single
+// [wmkim] 512-bit vshuffle call, so it's done as two 512-bit calls whose
+// [wmkim] results are concatenated - same "_lo"/"_hi" pattern as the
+// [wmkim] existing t32_*_lo/hi modes above, just for 16-bit/8x8. Values 52
+// [wmkim] and 53 match peano's T16_8x8_lo/T16_8x8_hi in aie2p_enums.h.
+def SHUFFLE_MODE_T16_8X8_LO   : I32EnumAttrCase<"T16_8X8_LO",   52, "t16_8x8_lo">;
+def SHUFFLE_MODE_T16_8X8_HI   : I32EnumAttrCase<"T16_8X8_HI",   53, "t16_8x8_hi">;
 
 def ShuffleMode : I32EnumAttr<
     "ShuffleMode",
@@ -84,7 +92,8 @@ def ShuffleMode : I32EnumAttr<
      SHUFFLE_MODE_T8_16X4, SHUFFLE_MODE_T8_4X16, SHUFFLE_MODE_T16_1X2_flip,
      SHUFFLE_MODE_T16_4X4, SHUFFLE_MODE_T16_4X2, SHUFFLE_MODE_T16_2X4,
      SHUFFLE_MODE_T16_8X2, SHUFFLE_MODE_T16_2X8, SHUFFLE_MODE_T16_16X2,
-     SHUFFLE_MODE_T16_2X16, SHUFFLE_MODE_T8_8X4, SHUFFLE_MODE_T8_4X8]> {
+     SHUFFLE_MODE_T16_2X16, SHUFFLE_MODE_T8_8X4, SHUFFLE_MODE_T8_4X8,
+     SHUFFLE_MODE_T16_8X8_LO, SHUFFLE_MODE_T16_8X8_HI]> {
   let cppNamespace = "::mlir::iree_compiler::aievec";
   let genSpecializedAttr = 0;
 }

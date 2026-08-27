@@ -773,7 +773,19 @@ class ShuffleOpConversion
   LogicalResult matchAndRewrite(
       aievec::ShuffleOp shuffleOp, OpAdaptor adaptor,
       ConversionPatternRewriter &rewriter) const override {
-    assert(AMDAIE::isAie2(device) && "ShuffleOp currently only supports AIE2.");
+    // [wmkim] added: AIE2P branch. Was previously hard-asserted AIE2-only, so
+    // [wmkim] vector.transpose could never legalize on AIE2P for shapes wider
+    // [wmkim] than the (unrelated) 512-bit case this pattern already handled
+    // [wmkim] via other AIEVec ops - this is what blocked VGG16's FC/Gemm
+    // [wmkim] layers (vector.transpose on vector<8x8xbf16>, 1024 bits) from
+    // [wmkim] compiling with AIE2P bf16 vectorization enabled. AIE2P's
+    // [wmkim] vshuffle intrinsic (xllvm::AIEVec2PVectorShuffleIntrOp, see
+    // [wmkim] XLLVMOps.td) has the exact same v16i32/v16i32/i32->v16i32
+    // [wmkim] signature as AIE2's, so the undef-rhs fallback
+    // [wmkim] (AIEVec2UndefV16I32IntrOp) and the rest of this function's
+    // [wmkim] logic are reused as-is for both devices.
+    assert((AMDAIE::isAie2(device) || AMDAIE::isAie2P(device)) &&
+           "ShuffleOp currently only supports AIE2/AIE2P.");
     auto loc = shuffleOp.getLoc();
     auto lhs = adaptor.getLhs();
     auto rhs = adaptor.getRhs();
@@ -787,13 +799,26 @@ class ShuffleOpConversion
         LLVM::ConstantOp::create(rewriter, loc, i32ty,
                                  static_cast<int32_t>(shuffleOp.getMode()))
             .getResult();
-    auto vShuffleVal = xllvm::AIEVec2VectorShuffleIntrOp::create(
-                           rewriter, loc, v16xi32ty,
-                           forceCastOperandsToSignature(
-                               rewriter, loc,
-                               /*operands=*/{lhs, rhs, modeAttrVal},
-                               /*signature=*/{v16xi32ty, v16xi32ty, i32ty}))
-                           .getResult();
+    // [wmkim] added: dispatch to the AIE2P vshuffle intrinsic when targeting
+    // [wmkim] AIE2P, otherwise keep using AIE2's (pre-existing behavior).
+    Value vShuffleVal;
+    if (AMDAIE::isAie2P(device)) {
+      vShuffleVal = xllvm::AIEVec2PVectorShuffleIntrOp::create(
+                        rewriter, loc, v16xi32ty,
+                        forceCastOperandsToSignature(
+                            rewriter, loc,
+                            /*operands=*/{lhs, rhs, modeAttrVal},
+                            /*signature=*/{v16xi32ty, v16xi32ty, i32ty}))
+                        .getResult();
+    } else {
+      vShuffleVal = xllvm::AIEVec2VectorShuffleIntrOp::create(
+                        rewriter, loc, v16xi32ty,
+                        forceCastOperandsToSignature(
+                            rewriter, loc,
+                            /*operands=*/{lhs, rhs, modeAttrVal},
+                            /*signature=*/{v16xi32ty, v16xi32ty, i32ty}))
+                        .getResult();
+    }
 
     vShuffleVal = forceCastValueToType(rewriter, loc, vShuffleVal,
                                        shuffleOp.getResult().getType());

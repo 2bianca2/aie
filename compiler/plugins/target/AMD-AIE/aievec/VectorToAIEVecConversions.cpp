@@ -260,7 +260,13 @@ struct LowerVectorTransposeOpToAIEVecShuffleOpPattern
     auto elemTyBitWidth = resTy.getElementTypeBitWidth();
     auto vBitWidth = std::accumulate(resShape.begin(), resShape.end(),
                                      elemTyBitWidth, std::multiplies<>());
-    if (vBitWidth != 512) return failure();
+    // [wmkim] widened from `!= 512` to also admit 1024: AIE2P's bf16 matmul
+    // [wmkim] (8x8x8 tile, see getSuportedAie2PTypes) needs to transpose a
+    // [wmkim] vector<8x8xbf16>, which is 1024 bits - wider than the 512-bit
+    // [wmkim] vshuffle hardware unit handles in one call. That specific
+    // [wmkim] 1024-bit case is special-cased below (split into two 512-bit
+    // [wmkim] shuffles); every other width is still rejected here as before.
+    if (vBitWidth != 512 && vBitWidth != 1024) return failure();
 
     if (elemTyBitWidth != 8 && elemTyBitWidth != 16 && elemTyBitWidth != 32)
       return failure();
@@ -274,6 +280,49 @@ struct LowerVectorTransposeOpToAIEVecShuffleOpPattern
     for (int64_t i = 0; i < static_cast<int64_t>(perm.size() - 2); ++i)
       if (perm[i] != i) return failure();
     if (perm.back() != static_cast<int64_t>(perm.size() - 2)) return failure();
+
+    // [wmkim] added: the 1024-bit special case (AIE2P-only in practice - see
+    // [wmkim] note above). Only a 16-bit-element, 8-wide-last-dim square
+    // [wmkim] transpose (e.g. vector<8x8xbf16>) is handled, since that's the
+    // [wmkim] only 1024-bit shape peano exposes dedicated lo/hi shuffle modes
+    // [wmkim] for (T16_8X8_LO/HI, see AIEVecAttributes.td and
+    // [wmkim] aie2p_enums.h). lhs and rhs together represent the 1024-bit
+    // [wmkim] source split into its low/high 512-bit halves; each shuffle
+    // [wmkim] call returns one 512-bit half of the transposed 1024-bit
+    // [wmkim] result - the same "_lo"/"_hi" convention already documented for
+    // [wmkim] e.g. t32_4x8_lo/hi in AIEVecOps.td. Semantics deduced by
+    // [wmkim] analogy with that worked example; not yet independently
+    // [wmkim] verified against a peano reference run.
+    if (vBitWidth == 1024) {
+      if (elemTyBitWidth != 16 || resShape.back() != 8) return failure();
+
+      auto elTy = resTy.getElementType();
+      auto halfVecTy = VectorType::get({32}, elTy);
+      auto pairVecTy = VectorType::get({2, 32}, elTy);
+      auto loc = transpOp.getLoc();
+
+      auto flatInput = rewriter.create<vector::ShapeCastOp>(
+          loc, pairVecTy, adaptor.getVector());
+      Value lhsHalf =
+          rewriter.create<vector::ExtractOp>(loc, flatInput, ArrayRef<int64_t>{0});
+      Value rhsHalf =
+          rewriter.create<vector::ExtractOp>(loc, flatInput, ArrayRef<int64_t>{1});
+
+      auto loRes = rewriter.create<aievec::ShuffleOp>(
+          loc, halfVecTy, lhsHalf, rhsHalf, aievec::ShuffleMode::T16_8X8_LO);
+      auto hiRes = rewriter.create<aievec::ShuffleOp>(
+          loc, halfVecTy, lhsHalf, rhsHalf, aievec::ShuffleMode::T16_8X8_HI);
+
+      Value zero = rewriter.create<arith::ConstantOp>(
+          loc, pairVecTy, rewriter.getZeroAttr(pairVecTy));
+      Value combined = rewriter.create<vector::InsertOp>(loc, loRes, zero,
+                                                          ArrayRef<int64_t>{0});
+      combined = rewriter.create<vector::InsertOp>(loc, hiRes, combined,
+                                                    ArrayRef<int64_t>{1});
+
+      rewriter.replaceOpWithNewOp<vector::ShapeCastOp>(transpOp, resTy, combined);
+      return success();
+    }
 
     auto shuffleMode = aievec::ShuffleMode::T32_4X4;
     if (elemTyBitWidth == 8) {

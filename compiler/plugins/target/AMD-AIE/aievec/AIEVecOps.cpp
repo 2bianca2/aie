@@ -363,6 +363,9 @@ LogicalResult ShuffleOp::verify() {
     case ShuffleMode::T16_16X4_HI:  // 25
     case ShuffleMode::T16_4X16_LO:  // 26
     case ShuffleMode::T16_4X16_HI:  // 27
+    // [wmkim] added: AIE2P-only, see AIEVecAttributes.td for rationale.
+    case ShuffleMode::T16_8X8_LO:   // 52
+    case ShuffleMode::T16_8X8_HI:   // 53
       modeBitWidth = 16u;
       break;
     case ShuffleMode::T32_4X4:  // 34

@@ -139,6 +139,27 @@ let extraClassDeclaration = [{
     }
 }];
 }
+
+// [wmkim] added: AIE2P vshuffle intrinsic (needed to lower a 1024-bit/16-bit
+// [wmkim] element/8x8 vector.transpose, e.g. an 8x8 bf16 tile, since AIE2P's
+// [wmkim] vshuffle hardware unit - like AIE2's - is fixed at 512 bits. A
+// [wmkim] genuinely 1024-bit transpose is synthesized as two 512-bit
+// [wmkim] vshuffle calls using the T16_8X8_LO/T16_8X8_HI modes (see
+// [wmkim] AIEVecAttributes.td), whose results are concatenated back together
+// [wmkim] in VectorToAIEVecConversions.cpp. Same signature shape as AIE2's
+// [wmkim] AIEVec2VectorShuffleIntrOp below (v16i32, v16i32, i32 mode ->
+// [wmkim] v16i32); confirmed via strings on libLLVM-19.so
+// [wmkim] (llvm.aie2p.vshuffle) and against IntrinsicsAIE2P.td:
+// [wmkim] class AIE2PVShuffle : DefaultAttrsIntrinsic<[llvm_v16i32_ty],
+// [wmkim] [llvm_v16i32_ty, llvm_v16i32_ty, llvm_i32_ty], [IntrNoMem]>;
+// [wmkim] def int_aie2p_vshuffle : ClangBuiltin<"__builtin_aie2p_vshuffle">,
+// [wmkim] AIE2PVShuffle;
+def AIEVec2PVectorShuffleIntrOp :
+    AIEVec2P_IntrOp<"vshuffle",
+        [TypeIs<"res", VectorOfLengthAndType<[16], [I32]>>]>,
+    Arguments<(ins VectorOfLengthAndType<[16], [I32]>:$lhs,
+                   VectorOfLengthAndType<[16], [I32]>:$rhs,
+                   I32:$mode)>;
 // [wmkim] end of added block.
 
 /////////////////////////////////////
