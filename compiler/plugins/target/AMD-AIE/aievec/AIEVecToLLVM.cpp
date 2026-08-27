@@ -667,13 +667,44 @@ class MatMulOpConversion
     Value matMulResVal;
 
     if (isa<Float32Type>(accVecTy.getElementType())) {
-      if (!AMDAIE::isAie2(device)) {
-        llvm_unreachable(
-            "no support for float matmul except for AIE2, for now");
-      }
-      matMulResVal =
-          forceCastOperandsAndCreateTarget<xllvm::AIEVec2MacConfBF16IntrOp>(
+      // [wmkim] added: AIE2P bf16 (f32-accumulate) matmul MAC support.
+      // [wmkim] Was previously `llvm_unreachable` for any non-AIE2 device, so
+      // [wmkim] AIE2P bf16 matmul could never reach codegen; VGG16's
+      // [wmkim] --iree-amdaie-enable-vectorization-passes=false flag exists
+      // [wmkim] to keep this path from ever being exercised on npu4 (AIE2P).
+      // [wmkim] Picks between the two shapes declared in XLLVMOps.td by the
+      // [wmkim] flattened lhs lane count: 32 lanes (bf16, 512b, "I512") for a
+      // [wmkim] 4x8x4-style tile, or 64 lanes (bf16, 1024b, "I1024") for the
+      // [wmkim] 8x8x8 tile that matches AIE2P's existing integer matmul shape
+      // [wmkim] in getSuportedAie2PTypes. Whichever shape
+      // [wmkim] VectorToAIEVecConversions.cpp ends up registering for AIE2P
+      // [wmkim] bf16, its flattened lhs will be exactly one of these two
+      // [wmkim] sizes, since forceCastValueToType only allows exact-size
+      // [wmkim] bitcasts (aside from the 128b/256b->512b widening case, which
+      // [wmkim] doesn't apply here).
+      if (AMDAIE::isAie2P(device)) {
+        int64_t lhsLanes = lhsFlattenedVecTy.getShape()[0];
+        if (lhsLanes == 32) {
+          matMulResVal = forceCastOperandsAndCreateTarget<
+              xllvm::AIEVec2PMacConfAcc512BF16IntrOp>(
               rewriter, loc, {lhs, rhs, acc, confCst});
+        } else if (lhsLanes == 64) {
+          matMulResVal =
+              forceCastOperandsAndCreateTarget<xllvm::AIEVec2PMacConfBF16IntrOp>(
+                  rewriter, loc, {lhs, rhs, acc, confCst});
+        } else {
+          llvm_unreachable(
+              "Unsupported bf16 matmul shape for AIE2P: expected a flattened "
+              "lhs of 32 or 64 bf16 lanes");
+        }
+      } else if (AMDAIE::isAie2(device)) {
+        matMulResVal = rmsi
+            forceCastOperandsAndCreateTarget<xllvm::AIEVec2MacConfBF16IntrOp>(
+                rewriter, loc, {lhs, rhs, acc, confCst});
+      } else {
+        llvm_unreachable(
+            "no support for float matmul except for AIE2/AIE2P, for now");
+      }
     } else {
       // In the case that it's i32 accumulation.
       if (AMDAIE::isAie2P(device)) {

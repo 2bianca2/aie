@@ -68,6 +68,79 @@ let extraClassDeclaration = [{
 }];
 }
 
+// [wmkim] added: AIE2P bf16 matmul MAC intrinsics (were missing before this).
+// [wmkim] Declaring the 2 shapes whose M/N/K interpretation we could verify
+// [wmkim] cleanly against IntrinsicsAIE2P.td (lhs elems = M*K, rhs elems =
+// [wmkim] K*N, acc elems = M*N, matching a single matmul tile exactly).
+// [wmkim] peano also exposes I512.I512.ACC1024.bf.mac.conf and
+// [wmkim] I512.I512.ACC2048.bf.mac.conf, but those pair 32-lane (I512)
+// [wmkim] inputs with a 32/64-lane accumulator, which cannot correspond to a
+// [wmkim] single M*K=32, K*N=32 tile (that forces M*N=16, i.e. ACC512) -
+// [wmkim] they are presumably a batched/replicated mode controlled by the
+// [wmkim] conf bits, not confirmed from the docs we have, and not needed for
+// [wmkim] either target shape below, so left undeclared for now.
+// [wmkim] All of AIE2P's bf16 acc/result types are genuine f32 vectors,
+// [wmkim] unlike the AIE2 bf16 MAC below which bitcasts acc to i64.
+
+// [wmkim] lhs/rhs: 32 bf16 lanes (512 bits, "I512"), acc/res: 16 f32 lanes
+// [wmkim] (512 bits, "ACC512"). e.g. matches a 4x8 @ 8x4 -> 4x4 tile.
+// [wmkim] Mirrors int_aie2p_I512_I512_ACC512_bf_mac_conf:
+// [wmkim] DefaultAttrsIntrinsic<[llvm_v16f32_ty],
+// [wmkim] [llvm_v32bf16_ty, llvm_v32bf16_ty, llvm_v16f32_ty, llvm_i32_ty],
+// [wmkim] [IntrReadMem, IntrInaccessibleMemOnly]>.
+def AIEVec2PMacConfAcc512BF16IntrOp :
+    AIEVec2P_IntrOp<"I512.I512.ACC512.bf.mac.conf",
+        [TypeIs<"res", VectorOfLengthAndType<[16], [F32]>>]>,
+    Arguments<(ins VectorOfLengthAndType<[32], [BF16]>:$lhs,
+                   VectorOfLengthAndType<[32], [BF16]>:$rhs,
+                   VectorOfLengthAndType<[16], [F32]>:$acc,
+                   I32:$conf)>{
+let extraClassDeclaration = [{
+    static SmallVector<Type> expectedArgTypes(MLIRContext *context) {
+        return {
+            VectorType::get({32}, BFloat16Type::get(context)),
+            VectorType::get({32}, BFloat16Type::get(context)),
+            VectorType::get({16}, Float32Type::get(context)),
+            IntegerType::get(context, 32)
+        };
+    }
+    static Type expectedResultType(MLIRContext *context) {
+        return VectorType::get({16}, Float32Type::get(context));
+    }
+}];
+}
+
+// [wmkim] lhs/rhs: 64 bf16 lanes (1024 bits, "I1024"), acc/res: 64 f32 lanes
+// [wmkim] (2048 bits, "ACC2048"). e.g. matches an 8x8 @ 8x8 -> 8x8 tile,
+// [wmkim] i.e. the same M=N=K=8 shape already used for AIE2P's integer matmul
+// [wmkim] in getSuportedAie2PTypes.
+// [wmkim] Mirrors int_aie2p_I1024_I1024_ACC2048_bf_mac_conf:
+// [wmkim] DefaultAttrsIntrinsic<[llvm_v64f32_ty],
+// [wmkim] [llvm_v64bf16_ty, llvm_v64bf16_ty, llvm_v64f32_ty, llvm_i32_ty],
+// [wmkim] [IntrReadMem, IntrInaccessibleMemOnly]>.
+def AIEVec2PMacConfAcc2048BF16IntrOp :
+    AIEVec2P_IntrOp<"I1024.I1024.ACC2048.bf.mac.conf",
+        [TypeIs<"res", VectorOfLengthAndType<[64], [F32]>>]>,
+    Arguments<(ins VectorOfLengthAndType<[64], [BF16]>:$lhs,
+                   VectorOfLengthAndType<[64], [BF16]>:$rhs,
+                   VectorOfLengthAndType<[64], [F32]>:$acc,
+                   I32:$conf)>{
+let extraClassDeclaration = [{
+    static SmallVector<Type> expectedArgTypes(MLIRContext *context) {
+        return {
+            VectorType::get({64}, BFloat16Type::get(context)),
+            VectorType::get({64}, BFloat16Type::get(context)),
+            VectorType::get({64}, Float32Type::get(context)),
+            IntegerType::get(context, 32)
+        };
+    }
+    static Type expectedResultType(MLIRContext *context) {
+        return VectorType::get({64}, Float32Type::get(context));
+    }
+}];
+}
+// [wmkim] end of added block.
+
 /////////////////////////////////////
 // Intrinsics for AIE2 ('phoenix') //
 /////////////////////////////////////
