@@ -760,24 +760,11 @@ class MatMulOpConversion
       signX = cast<IntegerType>(lhsElType).isUnsigned() ? 0 : 1;
       signY = cast<IntegerType>(rhsElType).isUnsigned() ? 0 : 1;
     }
-    // [wmkim] added: AIE2P's bf16 (float-accumulate) MAC intrinsics require
-    // [wmkim] cMode ("variant" in peano's aie2p_compute_control helper,
-    // [wmkim] lib/clang/19/include/aie2p_vmult.h) to be 1, not 0. Verified by
-    // [wmkim] inspecting peano's generated bf16 intrinsic wrappers (e.g.
-    // [wmkim] mac_elem_64): they all call
-    // [wmkim] aie2p_compute_control(sgn_x, sgn_y, /*amode=*/2, /*bmode=*/3,
-    // [wmkim] /*variant=*/1, ...) for the bf16xbf16->f32 case, whereas the
-    // [wmkim] int8/int32 AIE2P MAC wrappers (e.g. mac_8x8_8x8) use variant=0
-    // [wmkim] (matching what we already had). Using cMode=0 for AIE2P bf16
-    // [wmkim] matmul silently produced an all-zero accumulator result on real
-    // [wmkim] hardware (wrong "variant" of the MAC datapath), even though the
-    // [wmkim] op compiled and ran without error - root-caused via mlp_2layer
-    // [wmkim] all-zero NPU output after ruling out stale build artifacts.
-    // [wmkim] AIE2's bf16 MAC intrinsic (bf.mac16.conf) is a different
-    // [wmkim] hardware unit and still correctly uses cMode=0 (see the
-    // [wmkim] existing @matmulbf16bf16f32 lit test, conf=28).
-    uint32_t cMode =
-        (AMDAIE::isAie2P(device) && isa<Float32Type>(accElType)) ? 1 : 0;
+    // [wmkim] `configuration`/`confCst` below are only used by the int8/i32
+    // [wmkim] AIE2P/AIE2 matmul paths and AIE2's bf16 path further down; the
+    // [wmkim] AIE2P bf16 path uses its own `bfpConfig` (see the BFP16
+    // [wmkim] pipeline below), so cMode is always 0 here.
+    uint32_t cMode = 0;
     configuration = {signX, signY, aMode, bMode, cMode};
 
     // Flatten the inputs
@@ -795,70 +782,48 @@ class MatMulOpConversion
     Value matMulResVal;
 
     if (isa<Float32Type>(accVecTy.getElementType())) {
-      // [wmkim] added: AIE2P bf16 (f32-accumulate) matmul MAC support.
-      // [wmkim] Was previously `llvm_unreachable` for any non-AIE2 device, so
-      // [wmkim] AIE2P bf16 matmul could never reach codegen; VGG16's
-      // [wmkim] --iree-amdaie-enable-vectorization-passes=false flag exists
-      // [wmkim] to keep this path from ever being exercised on npu4 (AIE2P).
-      // [wmkim] Picks between the two shapes declared in XLLVMOps.td by the
-      // [wmkim] flattened lhs lane count: 32 lanes (bf16, 512b, "I512") for a
-      // [wmkim] 4x8x4-style tile, or 64 lanes (bf16, 1024b, "I1024") for the
-      // [wmkim] 8x8x8 tile that matches AIE2P's existing integer matmul shape
-      // [wmkim] in getSuportedAie2PTypes. Whichever shape
-      // [wmkim] VectorToAIEVecConversions.cpp ends up registering for AIE2P
-      // [wmkim] bf16, its flattened lhs will be exactly one of these two
-      // [wmkim] sizes, since forceCastValueToType only allows exact-size
-      // [wmkim] bitcasts (aside from the 128b/256b->512b widening case, which
-      // [wmkim] doesn't apply here).
+      // [wmkim] added: AIE2P bf16 (f32-accumulate) matmul MAC support, via
+      // [wmkim] the BFP16 conversion pipeline reproduced from
+      // [wmkim] uKernels/npu4/peano/matmul.cc (matmul_vectorized_bf16_f32).
+      // [wmkim] AIE2P's raw bf16 MAC hardware tops out at a 4x8x4 tile (see
+      // [wmkim] the note in XLLVMOps.td), which can't satisfy the 8x8x8 tile
+      // [wmkim] this compiler requires for AIE2P bf16 (getSuportedAie2PTypes)
+      // [wmkim] - so bf16 is converted to BFP16 before the MAC. A gets
+      // [wmkim] converted to BFP16 form directly; B additionally gets the
+      // [wmkim] "transpose" shuffle sequence first (per
+      // [wmkim] load_v64bf16_as_bfp16_T). This uses its own
+      // [wmkim] DataPathConfiguration (signX=signY=1, aMode=2, bMode=1,
+      // [wmkim] cMode=0), matching peano's mac_8x8_8x8T call - distinct from
+      // [wmkim] `configuration`/`confCst` computed above, which is for the
+      // [wmkim] int8/i32 and AIE2 bf16 paths.
       if (AMDAIE::isAie2P(device)) {
-        int64_t lhsLanes = lhsFlattenedVecTy.getShape()[0];
-        if (lhsLanes == 32) {
-          matMulResVal = forceCastOperandsAndCreateTarget<
-              xllvm::AIEVec2PMacConfAcc512BF16IntrOp>(
-              rewriter, loc, {lhs, rhs, acc, confCst});
-        } else if (lhsLanes == 64) {
-          // [wmkim] added: replaced the naive raw-bf16
-          // [wmkim] AIEVec2PMacConfAcc2048BF16IntrOp call (which silently
-          // [wmkim] produced wrong results on real hardware - it doesn't
-          // [wmkim] correspond to any real AIE2P calling convention) with the
-          // [wmkim] real bfp16/shuffle pipeline reproduced from
-          // [wmkim] uKernels/npu4/peano/matmul.cc. A gets converted to BFP16
-          // [wmkim] form directly; B additionally gets the "transpose"
-          // [wmkim] shuffle sequence first (per load_v64bf16_as_bfp16_T).
-          // [wmkim] This new pipeline uses its own DataPathConfiguration
-          // [wmkim] (signX=signY=1, aMode=2, bMode=1, cMode=0), matching
-          // [wmkim] peano's mac_8x8_8x8T call - distinct from `configuration`
-          // [wmkim] /`confCst` computed above, which was tuned for the old,
-          // [wmkim] now-unused intrinsic.
-          auto [aMantissa, aExponent] =
-              emitBf16ToBfp16Ebs8(rewriter, loc, lhs,
-                                  /*applyTransposeShuffle=*/false);
-          auto [bMantissa, bExponent] =
-              emitBf16ToBfp16Ebs8(rewriter, loc, rhs,
-                                  /*applyTransposeShuffle=*/true);
-          Type v64i32Ty = VectorType::get({64}, rewriter.getI32Type());
-          Value accI32 = bitcastValueToType(rewriter, loc, acc, v64i32Ty);
-          DataPathConfiguration bfpConfig(/*xSigned=*/true, /*ySigned=*/true,
-                                          /*aMode=*/2, /*bMode=*/1,
-                                          /*cMode=*/0);
-          Value bfpConfCst =
-              LLVM::ConstantOp::create(
-                  rewriter, loc, i32ty,
-                  rewriter.getI32IntegerAttr(bfpConfig.get()))
-                  .getResult();
-          Value macResI32 =
-              xllvm::AIEVec2PBfp576MacConfIntrOp::create(
-                  rewriter, loc, v64i32Ty,
-                  ValueRange{aMantissa, aExponent, bMantissa, bExponent,
-                            accI32, bfpConfCst})
-                  .getResult();
-          matMulResVal =
-              bitcastValueToType(rewriter, loc, macResI32, accFlattenedVecTy);
-        } else {
-          llvm_unreachable(
-              "Unsupported bf16 matmul shape for AIE2P: expected a flattened "
-              "lhs of 32 or 64 bf16 lanes");
-        }
+        assert(lhsFlattenedVecTy.getShape()[0] == 64 &&
+               "AIE2P bf16 matmul expects a flattened lhs of 64 bf16 lanes "
+               "(8x8x8 tile)");
+        auto [aMantissa, aExponent] =
+            emitBf16ToBfp16Ebs8(rewriter, loc, lhs,
+                                /*applyTransposeShuffle=*/false);
+        auto [bMantissa, bExponent] =
+            emitBf16ToBfp16Ebs8(rewriter, loc, rhs,
+                                /*applyTransposeShuffle=*/true);
+        Type v64i32Ty = VectorType::get({64}, rewriter.getI32Type());
+        Value accI32 = bitcastValueToType(rewriter, loc, acc, v64i32Ty);
+        DataPathConfiguration bfpConfig(/*xSigned=*/true, /*ySigned=*/true,
+                                        /*aMode=*/2, /*bMode=*/1,
+                                        /*cMode=*/0);
+        Value bfpConfCst =
+            LLVM::ConstantOp::create(
+                rewriter, loc, i32ty,
+                rewriter.getI32IntegerAttr(bfpConfig.get()))
+                .getResult();
+        Value macResI32 =
+            xllvm::AIEVec2PBfp576MacConfIntrOp::create(
+                rewriter, loc, v64i32Ty,
+                ValueRange{aMantissa, aExponent, bMantissa, bExponent,
+                          accI32, bfpConfCst})
+                .getResult();
+        matMulResVal =
+            bitcastValueToType(rewriter, loc, macResI32, accFlattenedVecTy);
       } else if (AMDAIE::isAie2(device)) {
         matMulResVal =
             forceCastOperandsAndCreateTarget<xllvm::AIEVec2MacConfBF16IntrOp>(

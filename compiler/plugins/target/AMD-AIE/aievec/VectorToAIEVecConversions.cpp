@@ -125,16 +125,12 @@ SmallVector<std::array<Type, 3>> getSuportedAie2PTypes(MLIRContext *context) {
 
   // [wmkim] added: AIE2P bf16 matmul (was missing before this - this is what
   // [wmkim] forced --iree-amdaie-enable-vectorization-passes=false for VGG16
-  // [wmkim] on npu4). Registering both shapes that AIEVecToLLVM.cpp's
-  // [wmkim] MatMulOpConversion knows how to lower for AIE2P bf16 (see the
-  // [wmkim] lhsLanes == 32 / == 64 branches there, backed by
-  // [wmkim] AIEVec2PMacConfAcc512BF16IntrOp / AIEVec2PMacConfAcc2048BF16IntrOp
-  // [wmkim] in XLLVMOps.td):
-  //   - 4x4x8: same shape as AIE2's bf16 matmul above.
-  //   - 8x8x8: same shape as AIE2P's int8 matmul just above, so it reuses
-  //     the tile size the rest of the AIE2P codegen path is already tuned
-  //     for.
-  types.push_back(getBFloatMatmul(/* M= */ 4, /* N= */ 4, /* K= */ 8, context));
+  // [wmkim] on npu4). 8x8x8: same shape as AIE2P's int8 matmul just above, so
+  // [wmkim] it reuses the tile size the rest of the AIE2P codegen path is
+  // [wmkim] already tuned for. Lowered via the BFP16 conversion pipeline in
+  // [wmkim] AIEVecToLLVM.cpp's MatMulOpConversion (raw bf16 tops out at a
+  // [wmkim] 4x8x4 tile on this hardware, so this 8x8x8 shape is only
+  // [wmkim] reachable through that conversion).
   types.push_back(getBFloatMatmul(/* M= */ 8, /* N= */ 8, /* K= */ 8, context));
   return types;
 }

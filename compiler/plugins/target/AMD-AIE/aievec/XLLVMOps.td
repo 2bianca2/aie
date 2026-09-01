@@ -68,86 +68,10 @@ let extraClassDeclaration = [{
 }];
 }
 
-// [wmkim] added: AIE2P bf16 matmul MAC intrinsics (were missing before this).
-// [wmkim] Declaring the 2 shapes whose M/N/K interpretation we could verify
-// [wmkim] cleanly against IntrinsicsAIE2P.td (lhs elems = M*K, rhs elems =
-// [wmkim] K*N, acc elems = M*N, matching a single matmul tile exactly).
-// [wmkim] peano also exposes I512.I512.ACC1024.bf.mac.conf and
-// [wmkim] I512.I512.ACC2048.bf.mac.conf, but those pair 32-lane (I512)
-// [wmkim] inputs with a 32/64-lane accumulator, which cannot correspond to a
-// [wmkim] single M*K=32, K*N=32 tile (that forces M*N=16, i.e. ACC512) -
-// [wmkim] they are presumably a batched/replicated mode controlled by the
-// [wmkim] conf bits, not confirmed from the docs we have, and not needed for
-// [wmkim] either target shape below, so left undeclared for now.
-// [wmkim] All of AIE2P's bf16 acc/result types are genuine f32 vectors,
-// [wmkim] unlike the AIE2 bf16 MAC below which bitcasts acc to i64.
-
-// [wmkim] lhs/rhs: 32 bf16 lanes (512 bits, "I512"), acc/res: 16 f32 lanes
-// [wmkim] (512 bits, "ACC512"). e.g. matches a 4x8 @ 8x4 -> 4x4 tile.
-// [wmkim] Mirrors int_aie2p_I512_I512_ACC512_bf_mac_conf:
-// [wmkim] DefaultAttrsIntrinsic<[llvm_v16f32_ty],
-// [wmkim] [llvm_v32bf16_ty, llvm_v32bf16_ty, llvm_v16f32_ty, llvm_i32_ty],
-// [wmkim] [IntrReadMem, IntrInaccessibleMemOnly]>.
-def AIEVec2PMacConfAcc512BF16IntrOp :
-    AIEVec2P_IntrOp<"I512.I512.ACC512.bf.mac.conf",
-        [TypeIs<"res", VectorOfLengthAndType<[16], [F32]>>]>,
-    Arguments<(ins VectorOfLengthAndType<[32], [BF16]>:$lhs,
-                   VectorOfLengthAndType<[32], [BF16]>:$rhs,
-                   VectorOfLengthAndType<[16], [F32]>:$acc,
-                   I32:$conf)>{
-let extraClassDeclaration = [{
-    static SmallVector<Type> expectedArgTypes(MLIRContext *context) {
-        return {
-            VectorType::get({32}, BFloat16Type::get(context)),
-            VectorType::get({32}, BFloat16Type::get(context)),
-            VectorType::get({16}, Float32Type::get(context)),
-            IntegerType::get(context, 32)
-        };
-    }
-    static Type expectedResultType(MLIRContext *context) {
-        return VectorType::get({16}, Float32Type::get(context));
-    }
-}];
-}
-
-// [wmkim] lhs/rhs: 64 bf16 lanes (1024 bits, "I1024"), acc/res: 64 f32 lanes
-// [wmkim] (2048 bits, "ACC2048"). e.g. matches an 8x8 @ 8x8 -> 8x8 tile,
-// [wmkim] i.e. the same M=N=K=8 shape already used for AIE2P's integer matmul
-// [wmkim] in getSuportedAie2PTypes.
-// [wmkim] Mirrors int_aie2p_I1024_I1024_ACC2048_bf_mac_conf:
-// [wmkim] DefaultAttrsIntrinsic<[llvm_v64f32_ty],
-// [wmkim] [llvm_v64bf16_ty, llvm_v64bf16_ty, llvm_v64f32_ty, llvm_i32_ty],
-// [wmkim] [IntrReadMem, IntrInaccessibleMemOnly]>.
-def AIEVec2PMacConfAcc2048BF16IntrOp :
-    AIEVec2P_IntrOp<"I1024.I1024.ACC2048.bf.mac.conf",
-        [TypeIs<"res", VectorOfLengthAndType<[64], [F32]>>]>,
-    Arguments<(ins VectorOfLengthAndType<[64], [BF16]>:$lhs,
-                   VectorOfLengthAndType<[64], [BF16]>:$rhs,
-                   VectorOfLengthAndType<[64], [F32]>:$acc,
-                   I32:$conf)>{
-let extraClassDeclaration = [{
-    static SmallVector<Type> expectedArgTypes(MLIRContext *context) {
-        return {
-            VectorType::get({64}, BFloat16Type::get(context)),
-            VectorType::get({64}, BFloat16Type::get(context)),
-            VectorType::get({64}, Float32Type::get(context)),
-            IntegerType::get(context, 32)
-        };
-    }
-    static Type expectedResultType(MLIRContext *context) {
-        return VectorType::get({64}, Float32Type::get(context));
-    }
-}];
-}
-
-// [wmkim] added: the REAL AIE2P bf16 matmul pipeline. AIEVec2PMacConfAcc2048BF16IntrOp
-// [wmkim] above (raw v64bf16 x v64bf16 -> v64f32) turned out to not correspond to
-// [wmkim] any real hardware calling convention: it silently produced garbage on
-// [wmkim] real hardware (all-zero after the cMode fix below became a
-// [wmkim] non-zero-but-wrong result). AIE2P's bf16 MAC datapath actually
-// [wmkim] operates on "BFP" (block floating point, one shared 8-bit exponent per
-// [wmkim] 8-lane group) operands, not raw bf16 - confirmed against the
-// [wmkim] validated reference in uKernels/npu4/peano/matmul.cc
+// [wmkim] added: the REAL AIE2P bf16 matmul pipeline. AIE2P's bf16 MAC
+// [wmkim] datapath operates on "BFP" (block floating point, one shared 8-bit
+// [wmkim] exponent per 8-lane group) operands, not raw bf16 - confirmed
+// [wmkim] against the validated reference in uKernels/npu4/peano/matmul.cc
 // [wmkim] (matmul_vectorized_bf16_f32 / load_v64bf16_as_bfp16(_T) / mac_8x8_8x8T),
 // [wmkim] and by compiling the aie2p_ups.h/aie2p_srs.h/aie2p_vmult.h peano
 // [wmkim] intrinsic headers with `clang --target=aie2p-none-unknown-elf
@@ -160,6 +84,17 @@ let extraClassDeclaration = [{
 // [wmkim] pair), and the real mac. See MatMulOpConversion in AIEVecToLLVM.cpp
 // [wmkim] for how they + the vshuffle op above are combined to reproduce
 // [wmkim] matmul_vectorized_bf16_f32's data flow.
+// [wmkim] (Raw bf16 MAC intrinsics - I512.I512.ACC512.bf.mac.conf,
+// [wmkim] I1024.I1024.ACC2048.bf.mac.conf, etc. - were tried first but ruled
+// [wmkim] out: llvm-aie's instruction patterns show ACC512/ACC1024/ACC2048
+// [wmkim] for 32-lane inputs are all the *same* physical instruction
+// [wmkim] (VMAC_f_vmac_bf_vmul_bf_core_X_X) sub-register-sliced to different
+// [wmkim] accumulator widths, i.e. raw bf16 tops out at a 4x8x4 tile - it
+// [wmkim] cannot produce the 8x8x8 tile this compiler requires for AIE2P
+// [wmkim] bf16. The wider core_Y_Y (I1024.I1024.ACC2048) variant does exist
+// [wmkim] as a distinct real instruction, but calling it produced wrong
+// [wmkim] results on real hardware and its correct conf encoding was never
+// [wmkim] found, so it's not used here.)
 
 // ups: widen 32 bf16 lanes to a 32-lane f32 accumulator.
 // Mirrors int_aie2p_v32bf16_to_v32accfloat (name recovered from codegen, see
@@ -200,8 +135,8 @@ let extraClassDeclaration = [{
 // (the "BFP576" name = 64x8b mantissa + 8x8b exponent = 512+64 = 576 bits),
 // an i32-bitcast f32 accumulator, and a config word. Mirrors
 // int_aie2p_BFP576_BFP576_ACC2048_mac_conf / mac_8x8_8x8T's underlying
-// builtin. Unlike AIEVec2PMacConfAcc2048BF16IntrOp above, this one is backed
-// by real hardware behavior confirmed via the peano ukernel reference.
+// builtin. Unlike the raw bf16 MAC intrinsics noted above, this one is
+// backed by real hardware behavior confirmed via the peano ukernel reference.
 def AIEVec2PBfp576MacConfIntrOp :
     AIEVec2P_IntrOp<"BFP576.BFP576.ACC2048.mac.conf",
         [TypeIs<"res", VectorOfLengthAndType<[64], [I32]>>]>,
