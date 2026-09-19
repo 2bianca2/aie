@@ -178,6 +178,19 @@ def AIEVec_MatMulOp:
                 Type lhs, Type rhs, Type acc, AMDAIE::AMDAIEDevice);
   }];
 
+  // [wmkim] added: the auto-generated builder now requires an explicit
+  // `already_bfp16` argument (since it's a real operand of the op), which
+  // breaks every pre-existing `rewriter.create<MatMulOp>(loc, type, lhs,
+  // rhs, acc)` call site (e.g. VectorToAIEVecConversions.cpp). This
+  // convenience overload restores the old 4-argument call signature,
+  // defaulting `already_bfp16` to absent (nullptr) - i.e. unchanged
+  // behavior for every existing caller.
+  let builders = [
+    OpBuilder<(ins "Type":$result, "Value":$lhs, "Value":$rhs, "Value":$acc), [{
+      build($_builder, $_state, result, lhs, rhs, acc, /*already_bfp16=*/nullptr);
+    }]>
+  ];
+
   // As the supported types are device dependent, verification needs to have
   // the device type. The `verifyOperands` function should be called when
   // the device type is available.
