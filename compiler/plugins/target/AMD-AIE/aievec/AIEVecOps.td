@@ -132,7 +132,8 @@ def AIEVec_MatMulOp:
   AIEVec_Op<"matmul", [Pure, AllTypesMatch<["acc", "result"]>]>,
    Arguments<(ins AnyVectorOfNonZeroRank:$lhs,
                   AnyVectorOfNonZeroRank:$rhs,
-                  AnyVectorOfNonZeroRank:$acc)>,
+                  AnyVectorOfNonZeroRank:$acc,
+                  OptionalAttr<UnitAttr>:$already_bfp16)>,
   Results<(outs AnyVectorOfNonZeroRank:$result)> {
   let summary = "AIE matrix-multiply and accummulate";
   let description = [{
@@ -154,6 +155,20 @@ def AIEVec_MatMulOp:
        `vector<8x8xi8>`   | `vector<8x8xi8>`   | `vector<8x8xi32>`
 
      These types are checked in `verifyOperands`.
+
+    [wmkim] added (experimental, for local testing only): when the
+    `already_bfp16` unit attribute is present, this op's `lhs`/`rhs` are
+    interpreted as already-packed BFP16EBS8 data (`vector<72xi8>` each:
+    64 mantissa bytes followed by 8 shared-exponent bytes, matching the
+    layout `to_v64bfp16ebs8` produces) instead of raw bf16. Only
+    meaningful for aie2P with an f32 accumulator. This lets the
+    AIE2P bf16 lowering in AIEVecToLLVM.cpp skip `emitBf16ToBfp16Ebs8`
+    and call the BFP16 MAC directly, to test feedback item 2 (does
+    skipping the in-kernel bf16->bfp16 conversion work / help) without
+    first solving feedback item 1 (a real bfp16 type at the dispatch
+    boundary). Not meant to be reachable from the normal
+    Flow/Stream/HAL lowering path - only from hand-written .mlir test
+    input to `iree-opt`/the aievec-to-llvm pass.
   }];
   let assemblyFormat = [{$lhs `,` $rhs `,` $acc attr-dict `:` type($lhs) `,`
                          type($rhs) `into` type($acc)}];

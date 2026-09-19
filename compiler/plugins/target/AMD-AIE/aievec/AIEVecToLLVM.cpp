@@ -10,6 +10,8 @@
 //===----------------------------------------------------------------------===//
 
 #include <numeric>
+#include <tuple>
+#include <utility>
 
 #include "AIEVecOps.h"
 #include "AIEVecUtils.h"
@@ -797,15 +799,46 @@ class MatMulOpConversion
       // [wmkim] `configuration`/`confCst` computed above, which is for the
       // [wmkim] int8/i32 and AIE2 bf16 paths.
       if (AMDAIE::isAie2P(device)) {
-        assert(lhsFlattenedVecTy.getShape()[0] == 64 &&
-               "AIE2P bf16 matmul expects a flattened lhs of 64 bf16 lanes "
-               "(8x8x8 tile)");
-        auto [aMantissa, aExponent] =
-            emitBf16ToBfp16Ebs8(rewriter, loc, lhs,
-                                /*applyTransposeShuffle=*/false);
-        auto [bMantissa, bExponent] =
-            emitBf16ToBfp16Ebs8(rewriter, loc, rhs,
-                                /*applyTransposeShuffle=*/true);
+        Value aMantissa, aExponent, bMantissa, bExponent;
+        // [wmkim] added (experimental, test-only): if the op carries the
+        // `already_bfp16` unit attribute, lhs/rhs are already packed
+        // BFP16EBS8 (vector<72xi8>: 64 mantissa bytes + 8 shared-exponent
+        // bytes, the same layout `to_v64bfp16ebs8`/emitBf16ToBfp16Ebs8
+        // below produces) - skip the bf16->bfp16 conversion entirely and
+        // just split the packed vector into its two halves. This is for
+        // testing feedback item 2 (does the hardware/MAC accept bfp16
+        // directly, without a per-call in-kernel conversion) - it is not
+        // reachable from the normal compiler pipeline, only from a
+        // hand-written .mlir test fed straight to the aievec-to-llvm pass.
+        if (op.getAlreadyBfp16()) {
+          assert(lhsFlattenedVecTy.getShape()[0] == 72 &&
+                 "AIE2P already-bfp16 matmul expects a flattened lhs of 72 "
+                 "i8 lanes (64 mantissa + 8 exponent bytes)");
+          auto splitPackedBfp16 = [&](Value v) -> std::pair<Value, Value> {
+            SmallVector<int32_t> mantissaMask, exponentMask;
+            for (int32_t i = 0; i < 64; ++i) mantissaMask.push_back(i);
+            for (int32_t i = 64; i < 72; ++i) exponentMask.push_back(i);
+            Value mantissa = LLVM::ShuffleVectorOp::create(
+                                  rewriter, loc, v, v, mantissaMask)
+                                  .getResult();
+            Value exponent = LLVM::ShuffleVectorOp::create(
+                                  rewriter, loc, v, v, exponentMask)
+                                  .getResult();
+            return {mantissa, exponent};
+          };
+          std::tie(aMantissa, aExponent) = splitPackedBfp16(lhs);
+          std::tie(bMantissa, bExponent) = splitPackedBfp16(rhs);
+        } else {
+          assert(lhsFlattenedVecTy.getShape()[0] == 64 &&
+                 "AIE2P bf16 matmul expects a flattened lhs of 64 bf16 lanes "
+                 "(8x8x8 tile)");
+          std::tie(aMantissa, aExponent) =
+              emitBf16ToBfp16Ebs8(rewriter, loc, lhs,
+                                  /*applyTransposeShuffle=*/false);
+          std::tie(bMantissa, bExponent) =
+              emitBf16ToBfp16Ebs8(rewriter, loc, rhs,
+                                  /*applyTransposeShuffle=*/true);
+        }
         Type v64i32Ty = VectorType::get({64}, rewriter.getI32Type());
         Value accI32 = bitcastValueToType(rewriter, loc, acc, v64i32Ty);
         DataPathConfiguration bfpConfig(/*xSigned=*/true, /*ySigned=*/true,
